@@ -3,10 +3,10 @@ import random
 import torch
 from torch.utils.data import DataLoader
 
-from config import Config
+from bbc_exp.config import *
 from codec.codec import Codec
 
-config = Config()
+config = Config_bitswap()
 
 # seed for replicating experiment and stability
 np.random.seed(config.seed)

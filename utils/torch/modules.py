@@ -1,7 +1,7 @@
 from contextlib import contextmanager
 
 import torch.nn.functional as F
-from torch.nn import Module, Parameter, Sequential, Dropout, ELU
+from torch.nn import Module, ModuleList, Parameter, Sequential, Dropout, ELU
 from torch.nn import init
 from PIL import Image
 import os
@@ -55,7 +55,7 @@ class WnModule(Module):
 
 # Data-Dependent Initialization + Weight Normalization extension of a "Conv2D" module of PyTorch
 class WnConv2d(WnModule):
-    def __init__(self, in_dim, out_dim, kernel_size, stride, padding, init_scale=1.0, loggain=True, bias=True):
+    def __init__(self, in_dim, out_dim, kernel_size, stride, padding, init_scale=1.0, loggain=True, bias=True, mask=None):
         super().__init__()
         self.in_dim, self.out_dim, self.kernel_size, self.stride, self.padding = in_dim, out_dim, kernel_size, stride, padding
         self.bias = bias
@@ -71,6 +71,9 @@ class WnConv2d(WnModule):
         else:
             init.ones_(self.gain)
         init.zeros_(self.b)
+
+        if mask is not None:
+            self.v = mask * self.v
 
     def _init(self, x):
         # calculate unnormalized activations
@@ -108,6 +111,132 @@ class WnConv2d(WnModule):
     def extra_repr(self):
         return 'in_dim={}, out_dim={}, kernel_size={}, stride={}, padding={}, init_scale={}, loggain={}'.format(self.in_dim, self.out_dim, self.kernel_size, self.stride, self.padding, self.init_scale, self.loggain)
 
+class WnDeConv2d(WnModule):
+    def __init__(self, in_dim, out_dim, kernel_size, stride, padding, init_scale=1.0, loggain=True, bias=True, mask=None):
+        super().__init__()
+        self.in_dim, self.out_dim, self.kernel_size, self.stride, self.padding = in_dim, out_dim, kernel_size, stride, padding
+        self.bias = bias
+        self.init_scale = init_scale
+        self.loggain = loggain
+        self.v = Parameter(torch.Tensor(in_dim, out_dim, self.kernel_size, self.kernel_size))
+        self.gain = Parameter(torch.Tensor(out_dim))
+        self.b = Parameter(torch.Tensor(out_dim), requires_grad=True if self.bias else False)
+
+        init.normal_(self.v, 0., _WN_INIT_STDV)
+        if self.loggain:
+            init.zeros_(self.gain)
+        else:
+            init.ones_(self.gain)
+        init.zeros_(self.b)
+
+        if mask is not None:
+            self.v = mask * self.v
+
+    def _init(self, x):
+        # calculate unnormalized activations
+        y_bchw = self._forward(x)
+        assert len(y_bchw.shape) == 4 and y_bchw.shape[:2] == (x.shape[0], self.out_dim)
+
+        # set g and b so that activations are normalized
+        y_c = y_bchw.transpose(0, 1).reshape(self.out_dim, -1)
+        m = y_c.mean(dim=1)
+        s = self.init_scale / (y_c.std(dim=1) + _SMALL)
+        assert m.shape == s.shape == self.gain.shape == self.b.shape
+
+        if self.loggain:
+            loggain = torch.clamp(torch.log(s), min=-10., max=None)
+            self.gain.data.copy_(loggain)
+        else:
+            self.gain.data.copy_(s)
+
+        if self.bias:
+            self.b.data.sub_(m * s)
+
+        # forward pass again, now normalized
+        return self._forward(x)
+
+    def _forward(self, x):
+        if self.loggain:
+            g = softplus(self.gain)
+        else:
+            g = self.gain
+
+        vnorm = self.v.view(self.out_dim, -1).norm(p=2, dim=1)
+        assert vnorm.shape == self.gain.shape == self.b.shape
+        w = self.v * (g / (vnorm + _SMALL)).view(1, self.out_dim, 1, 1)
+        return F.conv_transpose2d(x, w, self.b, stride=self.stride, padding=self.padding)
+
+    def extra_repr(self):
+        return 'in_dim={}, out_dim={}, kernel_size={}, stride={}, padding={}, init_scale={}, loggain={}'.format(self.in_dim, self.out_dim, self.kernel_size, self.stride, self.padding, self.init_scale, self.loggain)
+
+def get_linear_ar_mask(n_in, n_out, zerodiagonal=False):
+    assert n_in % n_out == 0 or n_out % n_in == 0, "%d - %d" % (n_in, n_out)
+
+    mask = np.ones([n_in, n_out], dtype=np.float32)
+    if n_out >= n_in:
+        k = n_out // n_in
+        for i in range(n_in):
+            mask[i + 1:, i * k:(i + 1) * k] = 0
+            if zerodiagonal:
+                mask[i:i + 1, i * k:(i + 1) * k] = 0
+    else:
+        k = n_in // n_out
+        for i in range(n_out):
+            mask[(i + 1) * k:, i:i + 1] = 0
+            if zerodiagonal:
+                mask[i * k:(i + 1) * k:, i:i + 1] = 0
+    return mask
+
+def get_conv_ar_mask(h, w, n_in, n_out, zerodiagonal=False):
+    l = (h - 1) // 2
+    m = (w - 1) // 2
+    mask = np.ones([h, w, n_in, n_out], dtype=np.float32)
+    mask[:l, :, :, :] = 0
+    mask[l, :m, :, :] = 0
+    mask[l, m, :, :] = get_linear_ar_mask(n_in, n_out, zerodiagonal)
+    return torch.tensor(mask).permute((3,2,0,1))
+
+class ArMulticonv2d(Module):
+    def __init__(self, n_in, n_h, n_out):
+        super(ArMulticonv2d, self).__init__()
+        self.conv_layers = ModuleList()
+        self.out_layers = ModuleList()
+
+        kernel_size = 3
+        stride = 1
+        padding = 1
+
+        zerodiagonal = False
+        for i, size in enumerate(n_h):
+            mask = get_conv_ar_mask(kernel_size, kernel_size, 
+                                    n_in, size, zerodiagonal)
+            conv_layer = WnConv2d(in_dim=n_in if i == 0 else n_h[i-1], 
+                                  out_dim=size, kernel_size=kernel_size, 
+                                  stride=stride, padding=padding, mask=mask)
+            self.conv_layers.append(conv_layer)
+
+        zerodiagonal = True
+        mask = torch.tensor(get_conv_ar_mask(kernel_size, kernel_size, 
+                                                n_h[-1], size, zerodiagonal))
+        for i, size in enumerate(n_out):
+            out_layer = WnConv2d(in_dim=n_h[-1], out_dim=size, 
+                                 kernel_size=kernel_size, stride=stride, 
+                                 padding=padding, mask=mask)
+            self.out_layers.append(out_layer)
+        
+        self.nl = ELU()
+
+    def forward(self, x, context):
+        for i, conv_layer in enumerate(self.conv_layers):
+            x = conv_layer(x)
+            if i == 0:
+                x += context
+            x = self.nl(x)
+        out = []
+        for i, out_layer in enumerate(self.out_layers):
+            out.append(out_layer(x))
+        return out
+    
 # numerically stable version of the "softplus" function
 def softplus(x):
     ret = -F.logsigmoid(-x)

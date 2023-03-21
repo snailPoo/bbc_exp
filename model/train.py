@@ -1,72 +1,57 @@
 # export PYTHONPATH=$PYTHONPATH:/tmp2/raaa/Compression/bbc_exp
+import numpy as np
+import os
+import time
+
 import torch
 from torch.utils.data import DataLoader
 from torch import nn
 from torchvision import *
-import os
-import time
-import numpy as np
 
 from tensorboardX import SummaryWriter
 
-import utils.torch.modules as modules
-from config import Config
+from contextlib import contextmanager
+from utils.common import same_seed, load_model, load_data
+from config import *
 
-config = Config()
+cf = Config_hilloc()
 
-# setup seeds to maintain experiment reproducibility
-torch.manual_seed(config.seed)
-torch.cuda.manual_seed(config.seed)
-np.random.seed(config.seed)
-torch.backends.cudnn.deterministic = True
+_INIT_ENABLED = False
+@contextmanager
+def init_mode():
+    global _INIT_ENABLED
+    assert not _INIT_ENABLED
+    _INIT_ENABLED = True
+    yield
+    _INIT_ENABLED = False
 
-def warmup(data_loader, warmup_batches):
+def warmup(model, data_loader, warmup_batches):
     # convert model to evaluation mode (no Dropout etc.)
-    config.model.eval()
+    model.eval()
 
     # prepare initialization batch
-    for batch_idx, (image, _) in enumerate(data_loader):
+    for batch_idx, (x, _) in enumerate(data_loader):
         # stack image with to current stack
-        warmup_images = torch.cat((warmup_images, image), dim=0) \
-            if batch_idx != 0 else image
+        warmup_images = torch.cat((warmup_images, x), dim=0) \
+            if batch_idx != 0 else x
 
         # stop stacking batches if reaching limit
         if batch_idx + 1 == warmup_batches:
             break
 
     # set the stack to current device
-    warmup_images = warmup_images.to(config.device)
+    warmup_images = warmup_images.to(cf.device)
 
     # do one 'special' forward pass to initialize parameters
-    with modules.init_mode():
-        logrecon, logdec, logenc, _ = config.model.loss(warmup_images)
+    with init_mode():
+        elbo, _ = model.loss(warmup_images, 'warmup')
 
-    # log
-    logdec = torch.sum(logdec, dim=1)
-    logenc = torch.sum(logenc, dim=1)
-
-    elbo = -logrecon + torch.sum(-logdec + logenc)
-
-    elbo = elbo.detach().cpu().numpy() * config.model.perdimsscale
-    entrecon = -logrecon.detach().cpu().numpy() * config.model.perdimsscale
-    entdec = -logdec.detach().cpu().numpy() * config.model.perdimsscale
-    entenc = -logenc.detach().cpu().numpy() * config.model.perdimsscale
-
-    kl = entdec - entenc
-
-    print(f'====> Epoch: {0} Average loss: {elbo:.4f}')
-    config.logger.add_text('architecture', f"{config.model}", 0)
-    config.logger.add_scalar('elbo/train', elbo, 0)
-    config.logger.add_scalar('x/reconstruction/train', entrecon, 0)
-    for i in range(1, logdec.shape[0] + 1):
-        config.logger.add_scalar(f'z{i}/encoder/train', entenc[i - 1], 0)
-        config.logger.add_scalar(f'z{i}/decoder/train', entdec[i - 1], 0)
-        config.logger.add_scalar(f'z{i}/KL/train', kl[i - 1], 0)
+    print(f'====> Epoch: 0 Average loss: {elbo:.4f}')
 
 
-def train(epoch, data_loader, optimizer):
+def train(epoch, data_loader, model, optimizer):
     # convert model to train mode (activate Dropout etc.)
-    config.model.train()
+    model.train()
 
     # get number of batches
     num_batch = len(data_loader)
@@ -76,164 +61,145 @@ def train(epoch, data_loader, optimizer):
 
     start_time = time.time()
 
-    # allocate memory for data
-    data = torch.zeros((data_loader.batch_size,) + config.model.xdim, device=config.device)
-
     # enumerate over the batches
-    for batch_idx, (batch, _) in enumerate(data_loader):
+    for batch_idx, (x, _) in enumerate(data_loader):
         # keep track of the global step
-        # global_step = (epoch - 1) * num_batch + (batch_idx + 1)
+        model.global_step = (epoch - 1) * num_batch + (batch_idx + 1)
+            
+        x = x.to(cf.device)
 
-        # update the learning rate according to schedule
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = config.scheduler(param_group['lr'], decay=config.decay)
+        # # update the learning rate according to schedule
+        # for param_group in optimizer.param_groups:
+        #     param_group['lr'] = scheduler(param_group['lr'], decay=cf.decay)
 
         # empty all the gradients stored
         optimizer.zero_grad()
 
-        # copy the mini-batch in the pre-allocated data-variable
-        data.copy_(batch)
-
         # evaluate the data under the model and calculate ELBO components
-        elbo, _ = config.model.loss(data, 'train')
+        elbo, _ = model.loss(x, 'train')
 
         # calculate gradients
         elbo.backward()
 
         # take gradient step
-        total_norm = nn.utils.clip_grad_norm_(config.model.parameters(), 1., norm_type=2)
+        total_norm = nn.utils.clip_grad_norm_(model.parameters(), 1., norm_type=2)
         optimizer.step()
 
-        # log
+        # log gradient norm
+        model.logger.add_scalar('gradient norm', total_norm, model.global_step)
+
         elbos += elbo
 
         # log and save parameters
-        if batch_idx % config.log_interval == 0 and config.log_interval < num_batch:
+        if batch_idx % cf.log_interval == 0 and cf.log_interval < num_batch:
+
             # print metrics to console
-            print(f'Train Epoch: {epoch} [{batch_idx}/{num_batch} ({100. * batch_idx / num_batch:.0f}%)]\tLoss: {elbo.item():.6f}\tGnorm: {total_norm:.2f}\tSteps/sec: {(time.time() - start_time) / (batch_idx + 1):.3f}')
-
-
-            # config.logger.add_scalar('step-sec', (time.time() - start_time) / (batch_idx + 1), global_step)
+            print(f'Train Epoch: {epoch} [{batch_idx}/{num_batch} ({100. * batch_idx / num_batch:.0f}%)]\t Loss: {elbo.item():.6f}\t Gradient norm: {total_norm:.2f}\t Steps/sec: {(time.time() - start_time) / (batch_idx + 1):.3f}')
 
             # log
-            # config.logger.add_scalar('elbo/train', elbo, global_step)
-            # for param_group in optimizer.param_groups:
-            #     lr = param_group['lr']
-            # config.logger.add_scalar('lr', lr, global_step)
+            model.logger.add_scalar('step-sec', (time.time() - start_time) / (batch_idx + 1), model.global_step)
+            for param_group in optimizer.param_groups:
+                lr = param_group['lr']
+            model.logger.add_scalar('lr', lr, model.global_step)
 
 
     # print the average loss of the epoch to the console
-    elbo = elbos.item() / num_batch
+    elbo = (elbos / num_batch).item()
     print(f'====> Epoch: {epoch} Average loss: {elbo:.4f}')
-    # config.logger.add_scalar('elbo/train', elbo, epoch)
 
 
-def eval(epoch, data_loader):
+def eval(epoch, data_loader, model):
     # convert model to evaluation mode (no Dropout etc.)
-    config.model.eval()
+    model.eval()
 
     # setup the reconstruction dataset
-    recon_dataset = None
     num_batch = len(data_loader)
     recon_batch_idx = int(torch.Tensor(1).random_(0, num_batch - 1))
 
     elbos = 0
 
-    # allocate memory for the input data
-    data = torch.zeros((data_loader.batch_size,) + config.model.xdim, device=config.device)
-
     # enumerate over the batches
-    for batch_idx, (batch, _) in enumerate(data_loader):
+    for batch_idx, (x, _) in enumerate(data_loader):
+        x = x.to(cf.device)
         # save batch for reconstruction
         if batch_idx == recon_batch_idx:
-            recon_dataset = data
-
-        # copy the mini-batch in the pre-allocated data-variable
-        data.copy_(batch)
+            recon_dataset = x
 
         with torch.no_grad():
             # evaluate the data under the model and calculate ELBO components
-            elbo, _ = config.model.loss(data, 'eval')
+            elbo, _ = model.loss(x, 'eval')
 
         elbos += elbo
 
-    elbo = elbos.item() / num_batch
+    elbo = (elbos / num_batch).item()
 
     # print metrics to console and Tensorboard
     print(f'\nEpoch: {epoch}\tTest loss: {elbo:.6f}')
-    config.logger.add_scalar('elbo/test', elbo, epoch)
+    # model.logger.add_scalar('elbo/test', elbo, epoch)
 
     # if the current ELBO is better than the ELBO's before, save parameters
-    if elbo < config.model.best_elbo and not np.isnan(elbo):
+    if elbo < model.best_elbo and not np.isnan(elbo):
         print("best result\n")
-        config.logger.add_scalar('elbo/besttest', elbo, epoch)
-        save_dir = f'model/params/{config.dataset}/'
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
+        model.logger.add_scalar('elbo/besttest', elbo, epoch)
+        if not os.path.exists(cf.model_dir):
+            os.makedirs(cf.model_dir)
         to_saved = {
-            'model_params' : config.model.state_dict(),
+            'model_params' : model.state_dict(),
             'elbo' : elbo,
         }
-        torch.save(to_saved, save_dir+f"{config.model_name}_best.pt")
-        config.model.best_elbo = elbo
+        torch.save(to_saved, cf.model_param)
+        model.best_elbo = elbo
 
-        config.model.sample(config.device, epoch)
-        config.model.reconstruct(recon_dataset, config.device, epoch)
+        if cf.model_name == 'bitswap':
+            model.sample(cf.device, epoch)
+            model.reconstruct(recon_dataset, cf.device, epoch)
+
+def count_num_params(model):
+    # print and log amount of parameters
+    model_parameters = filter(lambda p: p.requires_grad, model.parameters())
+    num_parameters = sum([np.prod(p.size()) for p in model_parameters])
+    print(f'Number of trainable parameters in model: {num_parameters}')
+    model.logger.add_text(f'hyperparams', '{num_parameters}', 0)
 
 
 if __name__ == '__main__':
-
-    # create loggers
-    config.logger = SummaryWriter(log_dir=config.log_dir)
-
-    # build model
-    config.load_model()
-
-    # set up optimizer
-    optimizer = config.optimizer
-
-    # print and log amount of parameters
-    model_parameters = filter(lambda p: p.requires_grad, config.model.parameters())
-    num_parameters = sum([np.prod(p.size()) for p in model_parameters])
-    print(f'Number of trainable parameters in model: {num_parameters}')
-    config.logger.add_text(f'hyperparams', '{num_parameters}', 0)
+    # Set seed for reproducibility
+    same_seed(cf.seed)
 
     # set up dataloader
-    config.load_data()
-    kwargs = {'num_workers': 8, 'pin_memory': False}
+    train_set, test_set = load_data(cf.dataset)
     train_loader = DataLoader(
-        dataset=config.train_set, 
-        sampler=None, batch_size=config.batch_size, 
-        shuffle=True, drop_last=True, **kwargs)
+        dataset=train_set, 
+        sampler=None, batch_size=cf.batch_size, 
+        shuffle=True, drop_last=True)
     test_loader = DataLoader(
-        dataset=config.test_set, 
-        sampler=None, batch_size=config.batch_size, 
-        shuffle=False, drop_last=True, **kwargs)
+        dataset=test_set, 
+        sampler=None, batch_size=cf.batch_size, 
+        shuffle=False, drop_last=True)
+    xdim = train_set[0][0].shape
+
+    # set up model and optimizer
+    model, optimizer, scheduler = load_model(cf.model_name, cf.model_param, 
+                                             cf.lr, cf.decay, xdim, cf.batch_size)
+
+    # create loggers
+    model.logger = SummaryWriter(log_dir=cf.log_dir)
+
+    model.to(cf.device)
+
+    count_num_params(model)
 
     # used by bitswap : data-dependent initialization
-    # warmup(train_loader, 25)
-
-    # setup exponential moving average decay (EMA) for the parameters.
-    # This basically means maintaining two sets of parameters during training/testing:
-    # 1. parameters that are the result of EMA
-    # 2. parameters not affected by EMA
-    # The (1)st parameters are only active during test-time.
-    # ema = modules.EMA(0.999)
-    # with torch.no_grad():
-    #     for name, param in config.model.named_parameters():
-    #         # only parameters optimized using gradient-descent are relevant here
-    #         if param.requires_grad:
-    #             # register (1) parameters
-    #             ema.register_ema(name, param.data)
-    #             # register (2) parameters
-    #             ema.register_default(name, param.data)
+    if cf.model_name == 'bitswap':
+        warmup(model, train_loader, 25)
 
     # initial test loss
-    eval(0, test_loader)
+    eval(0, test_loader, model)
 
-    # do the training loop and run over the test-set 1/5 epochs.
     print("Training")
-    for epoch in range(1, config.epochs + 1):
-        train(epoch, train_loader, optimizer)
-        if epoch % 5 == 0:
-            eval(epoch, test_loader)
+    for epoch in range(1, cf.epochs + 1):
+        train(epoch, train_loader, model, optimizer)
+        if scheduler is not None:
+            scheduler.step()
+        if epoch % cf.eval_freq == 0:
+            eval(epoch, test_loader, model)

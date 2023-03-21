@@ -1,44 +1,66 @@
-from torch import optim
-from torchvision import transforms, datasets
-
-from model.model_pool import *
-from utils.discretization import *
 import os
+import torch
 
+from utils.discretization import *
 
-# create class that scales up the data to [0,255] if called
-class ToInt:
-    def __call__(self, pic):
-        return pic * 255
-# set data pre-processing transforms
-transform_ops = transforms.Compose([transforms.ToTensor(), ToInt()])
-# learning rate schedule
-def lr_step(curr_lr, decay=0.99995, min_lr=5e-4):
-    # only decay after certain point
-    # and decay down until minimal value
-    if curr_lr > min_lr:
-        curr_lr *= decay
-        return curr_lr
-    return curr_lr
+class Config_hilloc(object):
+    def __init__(self):
+        self.seed=0   # seed for dataset generation
+        self.log_interval=100
+        self.eval_freq = 5
 
-class Config(object):
+        self.device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+        self.dataset = 'cifar'
+
+        self.epochs = 400
+        self.lr=0.002   # Learning rate.
+        self.decay=0
+        self.batch_size=64   # Batch size on one GPU.
+
+        self.model_name = "hilloc"
+        self.bbc_scheme = 'BBC'
+        self.discretization_method = 'conditional_prior'
+
+        self.model_dir = f'params/{self.dataset}'
+        self.model_param = os.path.join(self.model_dir, f"{self.model_name}_best.pt")
+        self.log_dir = f"log/{self.dataset}/{self.model_name}"
+
+        self.compression_always_variable=False
+        self.compression_exclude_sizes=False
+        self.n_flif=5   # number of images to compress with FLIF to start the bb chain (bbans mode)
+        self.initial_bits=int(1e8)  # if n_flif==0 then use a random message with this many bits
+        self.mode="train"   # Whether to run 'train' or 'eval' model.
+
+        # self.z_size=32   # Size of z variables.
+        # self.h_size=160   # Size of resnet block.
+        # self.kl_min=0.1   # Number of "free bits/nats".
+        # self.depth=1   # Number of downsampling blocks.
+        # self.num_blocks=24   # Number of resnet blocks for each downsampling layer.
+        # self.k=1   # Number of samples for IS objective.
+        # self.image_size=None   # Image size, automatically determined (input is ignored).
+        # self.enable_iaf=False   # True for IAF, False for Gaussian posterior
+        # self.bidirectional=True   # True for bidirectional, False for bottom-up inference
+
+class Config_bitswap(object):
     def __init__(self):
         self.seed = 99
         self.log_interval = 100  # interval for logging/printing of relevant values
+        self.eval_freq = 5
 
         self.device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
-        self.dataset = 'cifar'
+        self.dataset = 'imagenet'#'cifar'#'mnist'#'imagenet'
 
-        self.epochs = 10000000000
-        self.lr = 2e-3
-        self.decay = 0.999995  # decay of the learning rate when using learning rate schedule
+        self.epochs = 600
+        self.lr = 2e-4
+        self.decay = 0.99#0.999995  # learning rate decay
         self.batch_size = 16
 
         self.model_name = 'bitswap'
         self.bbc_scheme = 'bitswap'
         self.discretization_method = 'posterior_sampling'
 
-        self.model_param = f"model/params/{self.dataset}/{self.model_name}_best.pt"
+        self.model_dir = f'params/{self.dataset}'
+        self.model_param = os.path.join(self.model_dir, f"{self.model_name}_best.pt")
         self.log_dir = f"log/{self.dataset}/{self.model_name}"
 
         # used in compression stage
@@ -53,35 +75,3 @@ class Config(object):
 
         if self.discretization_method == 'posterior_sampling':
             self.discretization = posterior_sampling
-
-
-    def load_data(self):
-        print("load data")
-        if self.dataset == "cifar":
-            self.train_set = datasets.CIFAR10(root="data/cifar", train=True, transform=transform_ops, download=True)
-            self.test_set = datasets.CIFAR10(root="data/cifar", train=False, transform=transform_ops, download=True)
-        
-        elif self.dataset == "imagenet" or self.dataset == "imagenetcrop":
-            self.train_set = modules.ImageNet(root='data/imagenet/train', file='train.npy', transform=transform_ops)
-            self.test_set = modules.ImageNet(root='data/imagenet/test', file='test.npy', transform=transform_ops)
-        
-        else:
-            self.train_set = datasets.MNIST(root="model/data/mnist", train=True, download=True, 
-                                            transform=transforms.Compose([transforms.Pad(2), transforms.ToTensor(), ToInt()])
-                                           )
-    def load_model(self):
-        print("load model")
-        if self.model_name == 'bitswap':
-            self.model = ResNet_VAE()
-            self.optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-            self.scheduler = lr_step
-        
-        self.model.to(self.device)
-
-        if os.path.exists(self.model_param):
-            print('load pre-trained weights')
-            param = torch.load(self.model_param)
-            self.model.load_state_dict(param['model_params'])
-            self.model.best_elbo = param['elbo']
-        else:
-            print('weights not founnd')

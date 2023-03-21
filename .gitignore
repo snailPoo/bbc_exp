@@ -3,4 +3,6 @@
 /bins
 /bitstreams
 /model/params
+/model/log
 __pycache__
+test.ipynb

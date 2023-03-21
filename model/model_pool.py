@@ -1,20 +1,30 @@
+import numpy as np
+
 import torch
 from torch import nn
 from torchvision import *
-import numpy as np
+import torch.nn.functional as F
 
+# Bit-Swap
 import utils.torch.modules as modules
 import utils.torch.rand as random
 
+# HiLLoC
+from utils.distributions import DiagonalGaussian, discretized_logistic, compute_lowerbound
+from utils.torch.modules import WnConv2d, WnDeConv2d, ArMulticonv2d
+
+
 class ResNet_VAE(nn.Module):
-    def __init__(self):
+    def __init__(self, xdim):
         super().__init__()
         # default: disable compressing mode
         # if activated, tensors will be flattened
         self.compressing = False
-
+        self.logger = None
+        self.global_step = 0
+        
         # hyperparameters
-        self.xdim = (3, 32, 32) # data shape
+        self.xdim = xdim#(3, 32, 32) # data shape
         self.nz = 8  # number of latent variables
         self.zchannels = 8  # number of channels for the latent variables
         self.nprocessing = 4  # number of processing layers
@@ -473,20 +483,35 @@ class ResNet_VAE(nn.Module):
         if tag == 'train':
             # free bits technique, in order to prevent posterior collapse
             bits_pc = 1.
-            kl = torch.sum(torch.max(-logdec + logenc, bits_pc * torch.ones((self.nz, self.zdim[0]), device=x.device)))
+            kl = torch.sum(torch.max(-logdec + logenc, 
+                                     bits_pc * torch.ones((self.nz, self.zdim[0]), device=x.device)))
             elbo = -logrecon + kl
         else:
             elbo = -logrecon + torch.sum(-logdec + logenc)
         
         # scale by image dimensions to get "bits/dim"
         elbo *= self.perdimsscale
+        
+        # log
+        # compute the inference- and generative-model loss
+        entdec = (-1) * torch.sum(logdec, dim=1) * self.perdimsscale
+        entenc = (-1) * torch.sum(logenc, dim=1) * self.perdimsscale
+        entrecon = (-1) * logrecon * self.perdimsscale
+        kl = entdec - entenc
+
+        self.logger.add_scalar(f'elbo/{tag}',             elbo,     self.global_step)
+        self.logger.add_scalar(f'x/reconstruction/{tag}', entrecon, self.global_step)
+        for i in range(0, logdec.shape[0]):
+            self.logger.add_scalar(f'z{i+1}/encoder/{tag}', entenc[i], self.global_step)
+            self.logger.add_scalar(f'z{i+1}/decoder/{tag}', entdec[i], self.global_step)
+            self.logger.add_scalar(f'z{i+1}/KL/{tag}',      kl[i],     self.global_step)
 
         return elbo, zsamples
 
     # function to sample from the model (using the generative model)
     def sample(self, device, epoch, num=64):
         # sample "num" latent variables from the prior
-        z = random.sample_from_logistic(0, 1, ((num,) + self.zdim), device=device, bound=1e-5)
+        z = random.sample_from_logistic(0, 1, ((num,) + self.zdim), device=device)
 
         # sample from the generative distribution(s)
         for i in reversed(range(self.nz)):
@@ -508,7 +533,7 @@ class ResNet_VAE(nn.Module):
         x_grid = utils.make_grid(x_sample)
 
         # log
-        # self.logger.add_image('x_sample', x_grid, epoch)
+        self.logger.add_image('x_sample', x_grid, epoch)
 
     # function to sample a reconstruction of input data
     def reconstruct(self, x_orig, device, epoch):
@@ -542,4 +567,228 @@ class ResNet_VAE(nn.Module):
         x_grid = utils.make_grid(x_with_recon)
 
         # log
-        # self.logger.add_image('x_reconstruct', x_grid, epoch)
+        self.logger.add_image('x_reconstruct', x_grid, epoch)
+
+
+class IAFLayer(torch.nn.Module):
+    def __init__(self, mode, data_size, xdim, downsample=False):
+        super().__init__()
+        self.z_size = 32
+        self.h_size = 160
+        self.k = 1
+        self.kl_min = torch.tensor(0.1)
+
+        self.bidirectional = True
+        self.enable_iaf = False
+
+        self.downsample = downsample
+        self.data_size = data_size
+        self.mode = mode
+
+        self.act = nn.ELU()
+
+        self.in_dim = xdim[0]
+        self.up_split_conv2d   = WnConv2d(in_dim = self.h_size, 
+                                          out_dim = 2 * self.z_size + 2 * self.h_size, 
+                                          kernel_size = 3, 
+                                          stride = 2 if self.downsample else 1, 
+                                          padding = 1)
+        
+        self.up_merge_conv2d   = WnConv2d(in_dim = self.h_size, 
+                                          out_dim = self.h_size, 
+                                          kernel_size = 3, 
+                                          stride = 1, 
+                                          padding = 1)
+        
+        self.down_split_conv2d = WnConv2d(in_dim = self.h_size, 
+                                          out_dim = 4 * self.z_size + self.h_size * 2,
+                                          kernel_size = 3, 
+                                          stride = 1, 
+                                          padding = 1)
+        
+        self.down_merge_conv2d = WnConv2d(in_dim = self.h_size + self.z_size, 
+                                          out_dim = self.h_size, 
+                                          kernel_size = 3, 
+                                          stride = 1, 
+                                          padding = 1)
+        
+        self.down_merge_deconv2d = WnDeConv2d(in_dim = self.h_size + self.z_size, 
+                                              out_dim = self.h_size, 
+                                              kernel_size = 4, 
+                                              stride = 2, 
+                                              padding = 1)
+        
+        if self.enable_iaf:
+            self.ar_multiconv2d = ArMulticonv2d(self.z_size, 
+                                              [(self.h_size), (self.h_size)],
+                                               [self.z_size, self.z_size])
+
+    def up(self, input, **_):
+        self.qz_mean, self.qz_logsd, self.up_context, h = self.up_split(input)
+        return self.up_merge(h, input)
+
+    def up_split(self, input):
+        x = self.act(input)
+        x = self.up_split_conv2d(x)
+        return torch.split(x, [self.z_size, self.z_size, self.h_size, self.h_size], dim=1)
+
+    def up_merge(self, h, input):
+        h = nn.ELU()(h)
+        h = self.up_merge_conv2d(h)
+
+        if self.downsample:
+            input = F.interpolate(input, scale_factor=0.5, mode='nearest')
+
+        return input + 0.1 * h
+
+    def down(self, input):
+        h_det, posterior, prior, ar_context = self.down_split(
+            input, self.qz_mean, self.qz_logsd, self.up_context)
+
+        if self.mode in ["init", "sample"]:
+            z = prior.sample
+        else:
+            z = posterior.sample
+
+        if self.mode == "sample":
+            kl_cost = kl_obj = torch.zeros([self.data_size])
+        else:
+            logqs = posterior.logps(z)
+            if self.enable_iaf:
+                x = self.ar_multiconv2d(z, ar_context)
+                arw_mean, arw_logsd = x[0] * 0.1, x[1] * 0.1
+                z = (z - arw_mean) / torch.exp(arw_logsd)
+                logqs += arw_logsd
+
+            logps = prior.logps(z)
+
+            kl_cost = logqs - logps
+
+            if self.kl_min > 0:
+                # [0, 1, 2, 3] -> [0, 1] -> [1] / (b * k)
+                kl_ave = torch.mean(torch.sum(kl_cost, [2, 3]), [0], keepdim=True)
+                kl_ave = torch.max(kl_ave, self.kl_min)
+                kl_ave = kl_ave.repeat(self.data_size, 1)
+                kl_obj = torch.sum(kl_ave, [1])
+            else:
+                kl_obj = torch.sum(kl_cost, [1, 2, 3])
+
+            kl_cost = torch.sum(kl_cost, [1, 2, 3])
+
+        return self.down_merge(h_det, input, z), kl_obj, kl_cost
+
+    def down_split(self, input, qz_mean, qz_logsd, up_context):
+        x = self.act(input)
+        x = self.down_split_conv2d(x)
+
+        pz_mean, pz_logsd, rz_mean, rz_logsd, down_context, h_det = torch.split(x, [self.z_size] * 4 + [self.h_size] * 2, dim=1)
+        
+        prior = DiagonalGaussian(pz_mean, 2 * pz_logsd)
+        posterior = DiagonalGaussian(
+            qz_mean + (rz_mean if self.bidirectional else 0),
+            2 * (qz_logsd + (rz_logsd if self.bidirectional else 0)))
+        
+        return h_det, posterior, prior, up_context + down_context
+
+    def down_merge(self, h_det, input, z):
+        h = torch.cat([z, h_det], dim=1)
+        h = self.act(h)
+
+        if self.downsample:
+            input = F.interpolate(input, scale_factor=2, mode='nearest')
+            h = self.down_merge_deconv2d(h)
+        else:
+            h = self.down_merge_conv2d(h)
+        
+        return input + 0.1 * h
+
+
+class Convolutional_VAE(nn.Module):
+    def __init__(self, mode, batch_size, xdim):
+        super().__init__()
+        self.k = 1
+        self.depth = 1
+        self.h_size = 160
+        self.num_blocks = 24
+        self.mode = mode
+        self.xdim = xdim
+        self.batch_size = batch_size
+        # Input images are repeated k times on the input.
+        # This is used for Importance Sampling loss (k is number of samples).
+        self.data_size = self.batch_size * self.k
+
+        self.dec_log_stdv = nn.Parameter(torch.zeros(1))
+
+        # set-up current "best elbo"
+        self.best_elbo = np.inf
+        
+        self.logger = None
+        self.global_step = 0
+
+        # model 
+        self.h_top = nn.Parameter(torch.zeros(self.h_size), requires_grad=True)
+
+        self.layers = nn.ModuleList([IAFLayer(self.mode, self.data_size, self.xdim) for _ in range(self.num_blocks)])
+        
+        self.downsample_conv2d = WnConv2d(in_dim = self.xdim[0], 
+                                          out_dim = self.h_size, 
+                                          kernel_size = 5, 
+                                          stride = 2, 
+                                          padding = 2)
+        
+        self.upsample_deconv2d = WnDeConv2d(in_dim = self.h_size, 
+                                            out_dim = self.xdim[0], 
+                                            kernel_size = 4, 
+                                            stride = 2, 
+                                            padding = 1)
+
+    def loss(self, x, mode="train"):
+
+        input = self.preprocess_and_downsample(x)
+
+        for layer in self.layers:
+            input = layer.up(input)
+
+        image_size = x.shape[2:]
+        input = self.initial_input_down(image_size).to(x.device)
+        kl_cost = kl_obj = 0.0
+
+        for layer in reversed(list(self.layers)):
+            input, cur_obj, cur_cost = layer.down(input)
+            kl_obj += cur_obj
+            kl_cost += cur_cost
+
+        x_out = self.upsample_and_postprocess(input)
+
+        log_pxz = discretized_logistic(x_out, self.dec_log_stdv, sample=x)
+        obj = torch.sum(kl_obj - log_pxz)
+
+        if mode == "train":
+            self.logger.add_scalar('log_pxz/train', (-log_pxz).mean(), self.global_step)
+            self.logger.add_scalar('kl_obj/train',      kl_obj.mean(), self.global_step)
+            self.logger.add_scalar('kl_cost/train',    kl_cost.mean(), self.global_step)
+
+        loss = torch.sum(compute_lowerbound(log_pxz, kl_cost, self.k))
+        num_pixels = np.prod(x.shape[1:])
+        bits_per_dim = loss / (np.log(2.) * num_pixels * self.batch_size)
+        self.logger.add_scalar('bits per dim', bits_per_dim, self.global_step)
+
+        return bits_per_dim, x_out
+
+    def initial_input_down(self, image_size):
+        return torch.tile(self.h_top.view(1, -1, 1, 1),
+                         [self.data_size, 1, image_size[0] // 2,
+                          image_size[1] // 2])
+
+    def upsample_and_postprocess(self, input):
+        x = nn.ELU()(input)
+        x = self.upsample_deconv2d(x)
+        x = torch.clamp(x, -0.5 + 1 / 512., 0.5 - 1 / 512.)
+        return x
+
+    def preprocess_and_downsample(self, x):
+        x = x.float()
+        x = torch.clamp((x + 0.5) / 256.0, 0.0, 1.0) - 0.5
+        x = x.repeat(self.k, 1, 1, 1)
+        h = self.downsample_conv2d(x)  # -> [16, 16]
+        return h
