@@ -30,12 +30,3 @@ def discretized_logistic(mean, logscale, binsize=1 / 256.0, sample=None):
     sample = (torch.floor(sample / binsize) * binsize - mean) / scale
     logp = torch.log(torch.sigmoid(sample + binsize / scale) - torch.sigmoid(sample) + 1e-7)
     return torch.sum(logp, dim=[1, 2, 3])
-
-
-def compute_lowerbound(log_pxz, sum_kl_costs, k=1):
-    if k == 1:
-        return sum_kl_costs - log_pxz
-    # log 1/k \sum p(x | z) * p(z) / q(z | x) = -log(k) + logsumexp(log p(x|z) + log p(z) - log q(z|x))
-    log_pxz = torch.reshape(log_pxz, [-1, k])
-    sum_kl_costs = torch.reshape(sum_kl_costs, [-1, k])
-    return -(-torch.log(torch.tensor(k)) + torch.logsumexp(log_pxz - sum_kl_costs, dim=1))

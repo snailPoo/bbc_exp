@@ -83,7 +83,7 @@ def load_data(dataset):
     return train_set, test_set
 
 
-def load_model(model_name, model_param, lr, decay, xdim, batch_size):
+def load_model(model_name, model_param, lr, decay, xdim):
     print("load model")
 
     if model_name == 'bitswap':
@@ -93,7 +93,7 @@ def load_model(model_name, model_param, lr, decay, xdim, batch_size):
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=decay)
         
     elif model_name == 'hilloc':
-        model = Convolutional_VAE("train", batch_size, xdim)
+        model = Convolutional_VAE(xdim)
         optimizer = optim.Adamax(model.parameters(), lr=lr)
         scheduler = None
 

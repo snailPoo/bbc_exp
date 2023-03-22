@@ -155,7 +155,6 @@ def eval(epoch, data_loader, model):
             model.reconstruct(recon_dataset, cf.device, epoch)
 
 def count_num_params(model):
-    # print and log amount of parameters
     model_parameters = filter(lambda p: p.requires_grad, model.parameters())
     num_parameters = sum([np.prod(p.size()) for p in model_parameters])
     print(f'Number of trainable parameters in model: {num_parameters}')
@@ -168,30 +167,30 @@ if __name__ == '__main__':
 
     # set up dataloader
     train_set, test_set = load_data(cf.dataset)
+    kwargs = {"num_workers": 4, "pin_memory": True} if torch.cuda.is_available() else {}
     train_loader = DataLoader(
         dataset=train_set, 
         sampler=None, batch_size=cf.batch_size, 
-        shuffle=True, drop_last=True)
+        shuffle=True, drop_last=True, **kwargs)
     test_loader = DataLoader(
         dataset=test_set, 
         sampler=None, batch_size=cf.batch_size, 
-        shuffle=False, drop_last=True)
+        shuffle=False, drop_last=True, **kwargs)
     xdim = train_set[0][0].shape
+
+
 
     # set up model and optimizer
     model, optimizer, scheduler = load_model(cf.model_name, cf.model_param, 
-                                             cf.lr, cf.decay, xdim, cf.batch_size)
-
+                                             cf.lr, cf.decay, xdim)
     # create loggers
     model.logger = SummaryWriter(log_dir=cf.log_dir)
-
+    
     model.to(cf.device)
-
     count_num_params(model)
 
-    # used by bitswap : data-dependent initialization
-    if cf.model_name == 'bitswap':
-        warmup(model, train_loader, 25)
+    # data-dependent initialization
+    warmup(model, train_loader, 25)
 
     # initial test loss
     eval(0, test_loader, model)

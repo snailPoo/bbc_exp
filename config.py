@@ -13,9 +13,9 @@ class Config_hilloc(object):
         self.dataset = 'cifar'
 
         self.epochs = 400
-        self.lr=0.002   # Learning rate.
+        self.lr=2e-3
         self.decay=0
-        self.batch_size=64   # Batch size on one GPU.
+        self.batch_size=16
 
         self.model_name = "hilloc"
         self.bbc_scheme = 'BBC'
@@ -31,15 +31,6 @@ class Config_hilloc(object):
         self.initial_bits=int(1e8)  # if n_flif==0 then use a random message with this many bits
         self.mode="train"   # Whether to run 'train' or 'eval' model.
 
-        # self.z_size=32   # Size of z variables.
-        # self.h_size=160   # Size of resnet block.
-        # self.kl_min=0.1   # Number of "free bits/nats".
-        # self.depth=1   # Number of downsampling blocks.
-        # self.num_blocks=24   # Number of resnet blocks for each downsampling layer.
-        # self.k=1   # Number of samples for IS objective.
-        # self.image_size=None   # Image size, automatically determined (input is ignored).
-        # self.enable_iaf=False   # True for IAF, False for Gaussian posterior
-        # self.bidirectional=True   # True for bidirectional, False for bottom-up inference
 
 class Config_bitswap(object):
     def __init__(self):
