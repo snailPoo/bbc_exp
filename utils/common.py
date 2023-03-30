@@ -60,46 +60,48 @@ class ToInt:
     def __call__(self, pic):
         return pic * 255
 # set data pre-processing transforms
-transform_ops = transforms.Compose([transforms.ToTensor(), ToInt()])
-
+transform_ori = transforms.Compose([transforms.ToTensor(), ToInt()])
+transform_ori_28 = transforms.Compose([transforms.Pad(2), transforms.ToTensor(), ToInt()])
+transform_nor = transforms.Compose([transforms.ToTensor(), lambda x : x - 0.5])
+transform_nor_28 = transforms.Compose([transforms.Pad(2), transforms.ToTensor(), lambda x : x - 0.5])
 def load_data(dataset):
     print("load data")
 
     if dataset == "cifar":
-        train_set = datasets.CIFAR10(root="../data/cifar",  train=True, transform=transform_ops, download=True)
-        test_set  = datasets.CIFAR10(root="../data/cifar", train=False, transform=transform_ops, download=True)
+        train_set = datasets.CIFAR10(root="../data/cifar",  train=True, transform=transform_nor, download=True)
+        test_set  = datasets.CIFAR10(root="../data/cifar", train=False, transform=transform_nor, download=True)
     
     elif dataset == "imagenet" or dataset == "imagenetcrop":
-        train_set = ImageNetDataset('../data/imagenet/train_32', transform=transform_ops)
-        test_set  = ImageNetDataset('../data/imagenet/val_32'  , transform=transform_ops)
+        train_set = ImageNetDataset('../data/imagenet/train_32', transform=transform_ori)
+        test_set  = ImageNetDataset('../data/imagenet/val_32'  , transform=transform_ori)
     
     elif dataset == "mnist":
         train_set = datasets.MNIST(root="../data/mnist", train=True, download=True, 
-                                   transform=transforms.Compose([transforms.Pad(2), transforms.ToTensor(), ToInt()])
+                                   transform=transform_nor_28
                                   )
         test_set = datasets.MNIST(root="../data/mnist", train=False, download=True, 
-                                   transform=transforms.Compose([transforms.Pad(2), transforms.ToTensor(), ToInt()])
+                                   transform=transform_nor_28
                                   )
     return train_set, test_set
 
 
-def load_model(model_name, model_param, lr, decay, xdim):
+def load_model(model_name, model_pt, hparam, lr, decay):
     print("load model")
 
     if model_name == 'bitswap':
-        model = ResNet_VAE(xdim)
+        model = ResNet_VAE(hparam)
         optimizer = optim.Adam(model.parameters(), lr=lr)
         # scheduler = lr_step
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=decay)
         
     elif model_name == 'hilloc':
-        model = Convolutional_VAE(xdim)
+        model = Convolutional_VAE(hparam)
         optimizer = optim.Adamax(model.parameters(), lr=lr)
-        scheduler = None
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=decay)
 
-    if os.path.exists(model_param):
+    if os.path.exists(model_pt):
         print('load pre-trained weights')
-        param = torch.load(model_param)
+        param = torch.load(model_pt, map_location=torch.device('cpu'))
         model.load_state_dict(param['model_params'])
         model.best_elbo = param['elbo']
     else:

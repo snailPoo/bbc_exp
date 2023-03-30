@@ -29,4 +29,4 @@ def discretized_logistic(mean, logscale, binsize=1 / 256.0, sample=None):
     scale = torch.exp(logscale)
     sample = (torch.floor(sample / binsize) * binsize - mean) / scale
     logp = torch.log(torch.sigmoid(sample + binsize / scale) - torch.sigmoid(sample) + 1e-7)
-    return torch.sum(logp, dim=[1, 2, 3])
+    return logp.sum(dim=(1,2,3))

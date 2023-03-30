@@ -11,11 +11,10 @@ import utils.torch.rand as random
 
 # HiLLoC
 from utils.distributions import DiagonalGaussian, discretized_logistic
-from utils.torch.modules import WnConv2d, WnDeConv2d, ArMulticonv2d
 
 
 class ResNet_VAE(nn.Module):
-    def __init__(self, xdim):
+    def __init__(self, hparam):
         super().__init__()
         # default: disable compressing mode
         # if activated, tensors will be flattened
@@ -24,18 +23,19 @@ class ResNet_VAE(nn.Module):
         self.global_step = 0
         
         # hyperparameters
-        self.xdim = xdim#(3, 32, 32) # data shape
-        self.nz = 8  # number of latent variables
-        self.zchannels = 8  # number of channels for the latent variables
-        self.nprocessing = 4  # number of processing layers
+        self.xdim = hparam.xdim  # (3, 32, 32) # data shape
+        self.nz = hparam.nz  # number of latent variables
+        self.zchannels = hparam.zchannels  # number of channels for the latent variables
+        self.nprocessing = hparam.nprocessing  # number of processing layers
+        
         # latent height/width is always 16,
         # the number of channels depends on the dataset
         self.zdim = (self.zchannels, 16, 16)
         
-        self.resdepth = 8  # number of ResNet blocks
-        self.reswidth = 256  # number of channels in the convolutions in the ResNet blocks
-        self.kernel_size = 3  # size of the convolutional filter (kernel) in the ResNet blocks
-        dropout_p = 0.3
+        self.resdepth = hparam.resdepth  # number of ResNet blocks
+        self.reswidth = hparam.reswidth  # number of channels in the convolutions in the ResNet blocks
+        self.kernel_size = hparam.kernel_size  # size of the convolutional filter (kernel) in the ResNet blocks
+        dropout_p = hparam.dropout_p
 
         # apply these two factors (i.e. on the ELBO) in sequence and it results in "bits/dim"
         # factor to convert "nats" to bits
@@ -465,7 +465,7 @@ class ResNet_VAE(nn.Module):
                 logrecon = logp
 
             else:
-                logp = torch.sum(random.logistic_logp(mu, scale, x if i == 0 else z), dim=2)
+                logp = torch.sum(random.logistic_logp(mu, scale, z), dim=2)
                 logdec[i - 1] += logp
 
             z = z_next
@@ -491,7 +491,7 @@ class ResNet_VAE(nn.Module):
         
         # scale by image dimensions to get "bits/dim"
         elbo *= self.perdimsscale
-        
+
         # log
         # compute the inference- and generative-model loss
         entdec = (-1) * torch.sum(logdec, dim=1) * self.perdimsscale
@@ -570,197 +570,212 @@ class ResNet_VAE(nn.Module):
         self.logger.add_image('x_reconstruct', x_grid, epoch)
 
 
-class IAFLayer(torch.nn.Module):
-    def __init__(self, mode, xdim):
-        super().__init__()
-        self.z_channel = 32
-        self.h_size = 160 # Size of resnet block.
-        self.kl_min = torch.tensor(0.1) # Number of "free bits/nats".
+# class Convolutional_VAE(nn.Module):
+#     def __init__(self, xdim):
+#         super().__init__()
+#         self.z_channel = 32
+#         self.h_size = 160 # Size of resnet block.
+#         self.num_blocks = 4 # Number of resnet blocks for each downsampling layer.
 
-        self.bidirectional = True # True for bidirectional, False for bottom-up inference
-        self.enable_iaf = False # True for IAF, False for Gaussian posterior
+#         self.xdim = xdim
+#         self.num_pixels = np.prod(self.xdim)
 
-        self.mode = mode
-
-        self.act = nn.ELU()
-
-        self.in_dim = xdim[0]
-        self.up_split_conv2d   = WnConv2d(in_dim = self.h_size, 
-                                          out_dim = 2 * self.z_channel + 2 * self.h_size, 
-                                          kernel_size = 3, 
-                                          stride = 1, 
-                                          padding = 1)
+#         self.best_elbo = np.inf
+#         # self.register_buffer("best_elbo", torch.tensor([float('inf')))
         
-        self.up_merge_conv2d   = WnConv2d(in_dim = self.h_size, 
-                                          out_dim = self.h_size, 
-                                          kernel_size = 3, 
-                                          stride = 1, 
-                                          padding = 1)
+#         self.logger = None
+#         self.global_step = 0
+
+#         # model 
+#         self.dec_log_stdv = nn.Parameter(torch.Tensor([0.]))
+#         self.h_top = nn.Parameter(torch.zeros(self.h_size), requires_grad=True)
+
+#         self.layers = nn.ModuleList([modules.IAFLayer(self.xdim, self.h_size, self.z_channel) 
+#                                      for _ in range(self.num_blocks)])
         
-        self.down_split_conv2d = WnConv2d(in_dim = self.h_size, 
-                                          out_dim = 4 * self.z_channel + self.h_size * 2,
-                                          kernel_size = 3, 
-                                          stride = 1, 
-                                          padding = 1)
+#         self.downsample_conv2d = WnConv2d(in_dim = self.xdim[0], 
+#                                           out_dim = self.h_size, 
+#                                           kernel_size = 5, 
+#                                           stride = 2, 
+#                                           padding = 2)
         
-        self.down_merge_conv2d = WnConv2d(in_dim = self.h_size + self.z_channel, 
-                                          out_dim = self.h_size, 
-                                          kernel_size = 3, 
-                                          stride = 1, 
-                                          padding = 1)
-        
-        if self.enable_iaf:
-            self.ar_multiconv2d = ArMulticonv2d(self.z_channel, 
-                                              [(self.h_size), (self.h_size)],
-                                               [self.z_channel, self.z_channel])
+#         self.upsample_deconv2d = WnDeConv2d(in_dim = self.h_size, 
+#                                             out_dim = self.xdim[0], 
+#                                             kernel_size = 4, 
+#                                             stride = 2, 
+#                                             padding = 1)
 
-    def up(self, input, **_):
-        self.qz_mean, self.qz_logsd, self.up_context, h = self.up_split(input)
-        return self.up_merge(h, input)
+#     def loss(self, x, tag="train"):
 
-    def up_split(self, input):
-        x = self.act(input)
-        x = self.up_split_conv2d(x)
-        return torch.split(x, [self.z_channel, self.z_channel, self.h_size, self.h_size], dim=1)
+#         kl, obj = 0., 0.
 
-    def up_merge(self, h, input):
-        h = nn.ELU()(h)
-        h = self.up_merge_conv2d(h)
-        return input + 0.1 * h
+#         input = self.preprocess_and_downsample(x)
 
-    def down(self, input):
-        h_det, posterior, prior, ar_context = self.down_split(
-            input, self.qz_mean, self.qz_logsd, self.up_context)
+#         for layer in self.layers:
+#             input = layer.up(input)
 
-        if self.mode in ["init", "sample"]:
-            z = prior.sample
-        else:
-            z = posterior.sample
-        
-        batch_size = z.shape[0]
-        if self.mode == "sample":
-            kl_cost = kl_obj = torch.zeros([batch_size])
-        else:
-            logqs = posterior.logps(z)
-            if self.enable_iaf:
-                x = self.ar_multiconv2d(z, ar_context)
-                arw_mean, arw_logsd = x[0] * 0.1, x[1] * 0.1
-                z = (z - arw_mean) / torch.exp(arw_logsd)
-                logqs += arw_logsd
+#         input = self.initialize_input(x.shape).to(x.device)
 
-            logps = prior.logps(z)
+#         for layer in reversed(self.layers):
+#             input, cur_kl, cur_obj = layer.down(input)
+#             kl  += cur_kl
+#             obj += cur_obj
 
-            kl_cost = logqs - logps
+#         x_out = self.upsample_and_postprocess(input)
 
-            if self.kl_min > 0:
-                # [0, 1, 2, 3] -> [0, 1] -> [1] / (b * k)
-                kl_ave = torch.mean(torch.sum(kl_cost, [2, 3]), [0], keepdim=True)
-                kl_ave = torch.max(kl_ave, self.kl_min)
-                kl_ave = kl_ave.repeat(batch_size, 1)
-                kl_obj = torch.sum(kl_ave, [1])
-            else:
-                kl_obj = torch.sum(kl_cost, [1, 2, 3])
-
-            kl_cost = torch.sum(kl_cost, [1, 2, 3])
-
-        return self.down_merge(h_det, input, z), kl_obj, kl_cost
-
-    def down_split(self, input, qz_mean, qz_logsd, up_context):
-        x = self.act(input)
-        x = self.down_split_conv2d(x)
-
-        pz_mean, pz_logsd, rz_mean, rz_logsd, down_context, h_det = torch.split(x, [self.z_channel] * 4 + [self.h_size] * 2, dim=1)
-        
-        prior = DiagonalGaussian(pz_mean, 2 * pz_logsd)
-        posterior = DiagonalGaussian(
-            qz_mean + (rz_mean if self.bidirectional else 0),
-            2 * (qz_logsd + (rz_logsd if self.bidirectional else 0)))
-        
-        return h_det, posterior, prior, up_context + down_context
-
-    def down_merge(self, h_det, input, z):
-        h = torch.cat([z, h_det], dim=1)
-        h = self.act(h)
-        h = self.down_merge_conv2d(h)
-        return input + 0.1 * h
+#         logp_x = discretized_logistic(x_out, self.dec_log_stdv, sample=x)
+#         loss = (obj - logp_x).sum() / x.size(0)
+#         elbo = (kl  - logp_x)
+#         bpd  = elbo / (np.log(2.) * self.num_pixels)
 
 
+#         self.logger.add_scalar(f'kl/{tag}',              kl.mean(), self.global_step)
+#         self.logger.add_scalar(f'obj/{tag}',            obj.mean(), self.global_step)
+#         self.logger.add_scalar(f'bpd/{tag}',            bpd.mean(), self.global_step)
+#         self.logger.add_scalar(f'elbo/{tag}',          elbo.mean(), self.global_step)
+#         self.logger.add_scalar(f'log p(x|z)/{tag}', -logp_x.mean(), self.global_step)
+
+#         return loss, x_out
+
+#     def initialize_input(self, size):
+#         return torch.tile(self.h_top.view(1, -1, 1, 1),
+#                          [size[0], 1, size[2] // 2, size[3] // 2])
+
+#     def upsample_and_postprocess(self, input):
+#         x = nn.ELU()(input)
+#         x = self.upsample_deconv2d(x)
+#         x = torch.clamp(x, -0.5 + 1 / 512., 0.5 - 1 / 512.)
+#         return x
+
+#     def preprocess_and_downsample(self, x):
+#         x = x.float()
+#         x = torch.clamp((x + 0.5) / 256.0, 0.0, 1.0) - 0.5
+#         h = self.downsample_conv2d(x)  # -> [16, 16]
+#         return h
+
+# git@github.com:pclucas14/iaf-vae.git
 class Convolutional_VAE(nn.Module):
-    def __init__(self, xdim):
-        super().__init__()
-        self.h_size = 160 # Size of resnet block.
-        self.num_blocks = 24 # Number of resnet blocks for each downsampling layer.
-        self.xdim = xdim
+    def __init__(self, hparam):
+        super(Convolutional_VAE, self).__init__()
 
-        self.mode = None
+        self.h_size = hparam.h_size
+        self.depth = hparam.depth
+        self.n_blocks = hparam.n_blocks
+        self.xdim = hparam.xdim
+
         self.best_elbo = np.inf
-        
+        self.num_pixels = np.prod(self.xdim)
+
         self.logger = None
         self.global_step = 0
 
-        # model 
-        self.dec_log_stdv = nn.Parameter(torch.zeros(1))
-        self.h_top = nn.Parameter(torch.zeros(self.h_size), requires_grad=True)
+        self.register_parameter('h', torch.nn.Parameter(torch.zeros(self.h_size)))
+        self.register_parameter('dec_log_stdv', torch.nn.Parameter(torch.Tensor([0.])))
 
-        self.layers = nn.ModuleList([IAFLayer("init", self.xdim) 
-                                     for _ in range(self.num_blocks)])
+        layers = []
+        # build network
+        for i in range(self.depth):
+            layer = []
+
+            for j in range(self.n_blocks):
+                downsample = (i > 0) and (j == 0)
+                layer += [modules.IAFLayer(hparam, downsample)]
+
+            layers += [nn.ModuleList(layer)]
+
+        self.layers = nn.ModuleList(layers) 
         
-        self.downsample_conv2d = WnConv2d(in_dim = self.xdim[0], 
-                                          out_dim = self.h_size, 
-                                          kernel_size = 5, 
-                                          stride = 2, 
-                                          padding = 2)
-        
-        self.upsample_deconv2d = WnDeConv2d(in_dim = self.h_size, 
-                                            out_dim = self.xdim[0], 
-                                            kernel_size = 4, 
-                                            stride = 2, 
-                                            padding = 1)
+        self.first_conv = nn.Conv2d(self.xdim[0], self.h_size, 4, 2, 1)
+        self.last_conv = nn.ConvTranspose2d(self.h_size, self.xdim[0], 4, 2, 1)
 
-    def loss(self, x, tag="train"):
+    def loss(self, input, tag):
+        # assumes input is \in [-0.5, 0.5] 
+        x = self.first_conv(input)
+        kl, kl_obj = 0., 0.
 
-        kl_cost = kl_obj = 0.0
-
-        input = self.preprocess_and_downsample(x)
+        h = self.h.view(1, -1, 1, 1)
 
         for layer in self.layers:
-            input = layer.up(input)
+            for sub_layer in layer:
+                x = sub_layer.up(x)
 
-        input = self.initialize_input(x.shape).to(x.device)
+        h = h.expand_as(x)
+        self.hid_shape = x[0].size()
 
         for layer in reversed(self.layers):
-            input, cur_obj, cur_cost = layer.down(input)
-            kl_obj += cur_obj
-            kl_cost += cur_cost
+            for sub_layer in reversed(layer):
+                h, cur_kl, cur_obj = sub_layer.down(h)
+                kl     += cur_kl
+                kl_obj += cur_obj
 
-        x_out = self.upsample_and_postprocess(input)
+        x = F.elu(h)
+        x = self.last_conv(x)
+        x = x.clamp(min=-0.5 + 1. / 512., max=0.5 - 1. / 512.)
 
-        log_pxz = discretized_logistic(x_out, self.dec_log_stdv, sample=x)
+        log_pxz = discretized_logistic(x, self.dec_log_stdv, sample=input)
+        loss = (kl_obj - log_pxz).sum() / x.size(0)
+        elbo = (kl     - log_pxz)
+        bpd  = elbo / (np.log(2.) * self.num_pixels)
+
+        self.logger.add_scalar(f'kl/{tag}',               kl.mean(), self.global_step)
+        self.logger.add_scalar(f'obj/{tag}',          kl_obj.mean(), self.global_step)
+        self.logger.add_scalar(f'bpd/{tag}',             bpd.mean(), self.global_step)
+        self.logger.add_scalar(f'elbo/{tag}',           elbo.mean(), self.global_step)
+        self.logger.add_scalar(f'log p(x|z)/{tag}', -log_pxz.mean(), self.global_step)
+
+        return loss, x
+
+
+    def sample(self, n_samples=64):
+        h = self.h.view(1, -1, 1, 1)
+        h = h.expand((n_samples, *self.hid_shape))
         
-        obj = torch.sum(kl_obj - log_pxz)
-        loss = torch.sum(kl_cost - log_pxz)
+        for layer in reversed(self.layers):
+            for sub_layer in reversed(layer):
+                h, _, _ = sub_layer.down(h, sample=True)
 
-        bits_per_dim = loss / (np.log(2.) * np.prod(x.shape))
+        x = F.elu(h)
+        x = self.last_conv(x)
         
-        self.logger.add_scalar(f'log_pxz/{tag}', (-log_pxz).mean(), self.global_step)
-        self.logger.add_scalar(f'kl_cost/{tag}',    kl_cost.mean(), self.global_step)
-        self.logger.add_scalar( f'kl_obj/{tag}',     kl_obj.mean(), self.global_step)
-        self.logger.add_scalar(    f'bpd/{tag}',      bits_per_dim, self.global_step)
+        return x.clamp(min=-0.5 + 1. / 512., max=0.5 - 1. / 512.)
+    
+    
+    def cond_sample(self, input):
+        # assumes input is \in [-0.5, 0.5] 
+        x = self.first_conv(input)
+        kl, kl_obj = 0., 0.
 
-        return obj, x_out
+        h = self.h.view(1, -1, 1, 1)
 
-    def initialize_input(self, size):
-        return torch.tile(self.h_top.view(1, -1, 1, 1),
-                         [size[0], 1, size[2] // 2, size[3] // 2])
+        for layer in self.layers:
+            for sub_layer in layer:
+                x = sub_layer.up(x)
 
-    def upsample_and_postprocess(self, input):
-        x = nn.ELU()(input)
-        x = self.upsample_deconv2d(x)
-        x = torch.clamp(x, -0.5 + 1 / 512., 0.5 - 1 / 512.)
-        return x
+        h = h.expand_as(x)
+        self.hid_shape = x[0].size()
 
-    def preprocess_and_downsample(self, x):
-        x = x.float()
-        x = torch.clamp((x + 0.5) / 256.0, 0.0, 1.0) - 0.5
-        h = self.downsample_conv2d(x)  # -> [16, 16]
-        return h
+        outs = []
+
+        current = 0
+        for i, layer in enumerate(reversed(self.layers)):
+            for j, sub_layer in enumerate(reversed(layer)):
+                h, curr_kl, curr_kl_obj = sub_layer.down(h)
+                
+                h_copy = h
+                again = 0
+                # now, sample the rest of the way:
+                for layer_ in reversed(self.layers):
+                    for sub_layer_ in reversed(layer_):
+                        if again > current:
+                            h_copy, _, _ = sub_layer_.down(h_copy, sample=True)
+                        
+                        again += 1
+                        
+                x = F.elu(h_copy)
+                x = self.last_conv(x)
+                x = x.clamp(min=-0.5 + 1. / 512., max=0.5 - 1. / 512.)
+                outs += [x]
+
+                current += 1
+
+        return outs

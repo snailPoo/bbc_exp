@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from utils.common import same_seed, load_model, load_data
 from config import *
 
-cf = Config_hilloc()
+cf = Config_hilloc()#Config_bitswap #Config_hilloc
 
 _INIT_ENABLED = False
 @contextmanager
@@ -68,10 +68,6 @@ def train(epoch, data_loader, model, optimizer):
             
         x = x.to(cf.device)
 
-        # # update the learning rate according to schedule
-        # for param_group in optimizer.param_groups:
-        #     param_group['lr'] = scheduler(param_group['lr'], decay=cf.decay)
-
         # empty all the gradients stored
         optimizer.zero_grad()
 
@@ -98,9 +94,7 @@ def train(epoch, data_loader, model, optimizer):
 
             # log
             model.logger.add_scalar('step-sec', (time.time() - start_time) / (batch_idx + 1), model.global_step)
-            for param_group in optimizer.param_groups:
-                lr = param_group['lr']
-            model.logger.add_scalar('lr', lr, model.global_step)
+            model.logger.add_scalar('lr', optimizer.param_groups[0]['lr'], model.global_step)
 
 
     # print the average loss of the epoch to the console
@@ -147,7 +141,7 @@ def eval(epoch, data_loader, model):
             'model_params' : model.state_dict(),
             'elbo' : elbo,
         }
-        torch.save(to_saved, cf.model_param)
+        torch.save(to_saved, cf.model_pt)
         model.best_elbo = elbo
 
         if cf.model_name == 'bitswap':
@@ -176,13 +170,11 @@ if __name__ == '__main__':
         dataset=test_set, 
         sampler=None, batch_size=cf.batch_size, 
         shuffle=False, drop_last=True, **kwargs)
-    xdim = train_set[0][0].shape
-
-
+    cf.model_hparam.xdim = train_set[0][0].shape
 
     # set up model and optimizer
-    model, optimizer, scheduler = load_model(cf.model_name, cf.model_param, 
-                                             cf.lr, cf.decay, xdim)
+    model, optimizer, scheduler = load_model(cf.model_name, cf.model_pt, 
+                                             cf.model_hparam, cf.lr, cf.decay)
     # create loggers
     model.logger = SummaryWriter(log_dir=cf.log_dir)
     
@@ -190,7 +182,7 @@ if __name__ == '__main__':
     count_num_params(model)
 
     # data-dependent initialization
-    warmup(model, train_loader, 25)
+    # warmup(model, train_loader, 25)
 
     # initial test loss
     eval(0, test_loader, model)
