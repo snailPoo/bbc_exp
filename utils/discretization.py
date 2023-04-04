@@ -6,39 +6,37 @@ from sklearn.preprocessing import KBinsDiscretizer
 
 # returns discretization bin endpoints and centres
 # This step is only done once after the model training is completed
-def posterior_sampling(cf):
+def posterior_sampling(cf, model, train_loader):
     
+    nz = model.nz
+    zdim = (model.zchannels, 16, 16)
     quantbits = cf.z_quantbits
     num_sample_per_bin = 30
 
     num_bin = (1 << quantbits)
     # total number of samples (num_sample_per_bin * number of bins)
     total_samples = num_sample_per_bin * num_bin
-    total_zdim = np.prod(cf.model.zdim)
+    total_zdim = np.prod(zdim)
 
     with torch.no_grad():
         # check if there does already exists a file with the discretization bins saved into it
-        if not os.path.join(cf.discretization_dir, f'{cf.model_name}.pt'):
+        if not os.path.exists(os.path.join(cf.discretization_dir, f'{cf.model_name}.pt')):
             # set up an empty tensor for all the bins (number of latent variables, total dimension of latent, number of bins)
             # note that we do not include the first and last endpoints, because those will always be -inf and inf
-            z_bin_ends = np.zeros((cf.model.nz, total_zdim, num_bin - 1))
-            z_bin_centres   = np.zeros((cf.model.nz, total_zdim, num_bin))
+            z_bin_ends = np.zeros((nz, total_zdim, num_bin - 1))
+            z_bin_centres   = np.zeros((nz, total_zdim, num_bin))
 
             # top latent is fixed, so we can calculate the discretization bins without samples
             zbins = Bins(mu = torch.zeros((1, 1, total_zdim)), 
                          scale = torch.ones((1, 1, total_zdim)), 
                          precision = quantbits)
-            z_bin_ends[cf.model.nz - 1] = zbins.endpoints().numpy()
-            z_bin_centres[cf.model.nz - 1] = zbins.centres().numpy()
+            z_bin_ends[nz - 1] = zbins.endpoints().numpy()
+            z_bin_centres[nz - 1] = zbins.centres().numpy()
 
             batch_size = 128 # batch size to iterate over
             num_batch = total_samples // batch_size # number of num_batch
 
-            # set-up a batch-loader for the dataset
-            train_loader = DataLoader(
-                dataset=cf.train_set, 
-                batch_size=batch_size, 
-                shuffle=True, drop_last=True)
+            # set-up a batch-loader for the datasetc
             datapoints = list(train_loader)
 
             # concatenate the dataset with itself if the length is not sufficient
@@ -46,25 +44,25 @@ def posterior_sampling(cf):
                 datapoints += datapoints
 
             # use 16-bit values to reduce memory usage
-            gen_samples = np.zeros((cf.model.nz, total_samples) + cf.model.zdim, dtype=np.float16)
-            inf_samples = np.zeros((cf.model.nz, total_samples) + cf.model.zdim, dtype=np.float16)
+            gen_samples = np.zeros((nz, total_samples) + zdim, dtype=np.float16)
+            inf_samples = np.zeros((nz, total_samples) + zdim, dtype=np.float16)
 
-            gen_samples[-1] = sample_from_logistic(0, 1, (total_samples,) + cf.model.zdim, device="cpu", bound=1e-30).numpy()
+            gen_samples[-1] = sample_from_logistic(0, 1, (total_samples,) + zdim, device="cpu", bound=1e-30).numpy()
 
             # iterate over the latent variables
             # gen z7 given z8 ~ gen z1 given z2
-            for zi in reversed(range(1, cf.model.nz)):
+            for zi in reversed(range(1, nz)):
                 # obtain samples from the generative model
                 iterator = tqdm(range(num_batch), desc=f"sampling z{zi} from generator")
                 for bi in iterator:
                     gen_from = bi * batch_size
                     to = gen_from + batch_size
 
-                    mu, scale = cf.model.generate(zi)(given=torch.from_numpy(gen_samples[zi][gen_from: to]).to(cf.device).float())
+                    mu, scale = model.generate(zi)(given=torch.from_numpy(gen_samples[zi][gen_from: to]).to(cf.device).float())
                     gen_samples[zi - 1][gen_from: to] = sample_from_logistic(mu, scale, mu.shape, device=cf.device, bound=1e-30).cpu()
 
             # inf z1 given x ~ inf z7 given z6
-            for zi in range(0, cf.model.nz - 1):
+            for zi in range(0, nz - 1):
                 # obtain samples from the inference model (using the dataset)
                 iterator = tqdm(range(num_batch), desc=f"sampling z{zi + 1} from inference model")
                 for bi in iterator:
@@ -72,11 +70,11 @@ def posterior_sampling(cf):
                         given = (datapoints[bi] if cf.dataset == "imagenet" else datapoints[bi][0])
                     else:
                         given = torch.from_numpy(inf_samples[zi - 1][gen_from: to])
-                    mu, scale = cf.model.infer(zi)(given=given.to(cf.device).float())
+                    mu, scale = model.infer(zi)(given=given.to(cf.device).float())
                     inf_samples[zi][gen_from: to] = sample_from_logistic(mu, scale, mu.shape, device=cf.device, bound=1e-30).cpu().numpy()
 
             # get the discretization bins
-            for zi in range(cf.model.nz - 1):
+            for zi in range(nz - 1):
                 samples = np.concatenate([gen_samples[zi], inf_samples[zi]], axis=0).reshape(-1, total_zdim)
                 z_bin_ends[zi], z_bin_centres[zi] = discretize_kbins(samples, quantbits, strategy='uniform')
 

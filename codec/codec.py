@@ -30,10 +30,10 @@ from utils.torch.rand import ImageBins
         encode z
 '''
 class Codec:
-    def __init__(self, config, dataloader, state):
+    def __init__(self, config, model, dataloader, state):
         self.cf = config
-        self.model = self.cf.model
-        self.dataloader = dataloader
+        self.model = model
+        self.train_loader, self.test_loader = dataloader
         self.state = state
         self.initialstate = self.state.copy()
         self.decoded_data = []
@@ -41,27 +41,28 @@ class Codec:
         self.total_xdim = np.prod(self.model.xdim)
         
         print("discretizing")
-        self.z_bin = self.cf.discretization(self.cf)
+        self.z_bin = self.cf.discretization(self.cf, self.model, self.train_loader)
         xbin = ImageBins(self.cf.type, self.cf.device, self.total_xdim)
         self.x_bin = xbin.endpoints(), xbin.centres()
+        self.num_data = 1000# self.test_loader.__len__()
 
     def compress(self):
         reswidth = 252 # why?
 
         # metrics for the results
-        nets  = np.zeros((len(self.cf.data_to_compress), ), dtype=np.float64)
-        elbos = np.zeros((len(self.cf.data_to_compress), ), dtype=np.float64)
-        cma   = np.zeros((len(self.cf.data_to_compress), ), dtype=np.float64)
-        total = np.zeros((len(self.cf.data_to_compress), ), dtype=np.float64)
+        nets  = np.zeros((self.num_data, ), dtype=np.float64)
+        elbos = np.zeros((self.num_data, ), dtype=np.float64)
+        cma   = np.zeros((self.num_data, ), dtype=np.float64)
+        total = np.zeros((self.num_data, ), dtype=np.float64)
 
         print("Start compressing images")
         self.model.compress_mode(True)
 
         # ******* sender *******
-        iterator = tqdm(self.dataloader, total=len(self.dataloader), desc="Sender")
+        iterator = tqdm(self.test_loader, total=len(self.test_loader), desc="Sender")
         for i, (x, _) in enumerate(iterator):
             # print(f'{i}-th {len(self.state)=}')
-            if i == 10:
+            if i == self.num_data:
                 break
             x = x.to(self.cf.device).view(self.total_xdim)
 
@@ -113,10 +114,10 @@ class Codec:
         
         print("Start decompressing")
         # ****** receiver ******
-        iterator = tqdm(range(len(self.dataloader)), desc="Receiver")
+        iterator = tqdm(range(len(self.test_loader)), desc="Receiver")
         for i in iterator:
             # print(f'{i}-th {len(self.state)=}')
-            if i == 10:
+            if i == self.num_data:
                 break
             scheme = BitSwap if self.cf.bbc_scheme == 'bitswap' else BBC
             x, self.state = scheme(self.cf, self.model, self.state, self.x_bin, self.z_bin).decoding()
