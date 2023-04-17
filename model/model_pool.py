@@ -5,12 +5,164 @@ from torch import nn
 from torchvision import *
 import torch.nn.functional as F
 
+## BB-ANS
+from torch.distributions import Normal, Beta, Binomial
+from torchvision.utils import save_image
+
+from utils.distributions import beta_binomial_log_pdf
+
+
 # Bit-Swap
 import utils.torch.modules as modules
 import utils.torch.rand as random
 
+
 # HiLLoC
-from utils.distributions import DiagonalGaussian, discretized_logistic
+from utils.distributions import discretized_logistic
+
+
+class BetaBinomialVAE(nn.Module):
+    def __init__(self, hparam):
+        super().__init__()
+        self.hidden_dim = hparam.h_size
+        self.latent_dim = hparam.z_size
+        self.xdim = hparam.xdim
+        self.x_flat = int(np.prod(self.xdim))
+        self.dataset = hparam.dataset
+
+        self.register_buffer('prior_mean', torch.zeros(1))
+        self.register_buffer('prior_std', torch.ones(1))
+        self.register_buffer('n', torch.ones(128, self.x_flat) * 255.)
+
+        self.fc1 = nn.Linear(self.x_flat, self.hidden_dim)
+        self.bn1 = nn.BatchNorm1d(self.hidden_dim)
+
+        self.fc21 = nn.Linear(self.hidden_dim, self.latent_dim)
+        self.fc22 = nn.Linear(self.hidden_dim, self.latent_dim)
+        self.bn21 = nn.BatchNorm1d(self.latent_dim)
+        self.bn22 = nn.BatchNorm1d(self.latent_dim)
+
+        self.fc3 = nn.Linear(self.latent_dim, self.hidden_dim)
+        self.bn3 = nn.BatchNorm1d(self.hidden_dim)
+
+        self.fc4 = nn.Linear(self.hidden_dim, self.x_flat*2)
+
+        self.best_elbo = np.inf
+        self.logger = None
+
+    def encode(self, x):
+        """Return mu, sigma on latent"""
+        h = x / 255.  # otherwise we will have numerical issues
+        h = F.relu(self.bn1(self.fc1(h)))
+        return self.bn21(self.fc21(h)), torch.exp(self.bn22(self.fc22(h)))
+
+    def reparameterize(self, mu, std):
+        if self.training:
+            eps = torch.randn_like(std)
+            return eps.mul(std).add_(mu)
+        else:
+            return mu
+
+    def decode(self, z):
+        h = F.relu(self.bn3(self.fc3(z)))
+        h = self.fc4(h)
+        log_alpha, log_beta = torch.split(h, self.x_flat, dim=1)
+        return torch.exp(log_alpha), torch.exp(log_beta)
+
+    def loss(self, x, tag):
+        z_mu, z_std = self.encode(x.view(-1, self.x_flat))
+        z = self.reparameterize(z_mu, z_std)  # sample zs
+
+        x_alpha, x_beta = self.decode(z)
+        l = beta_binomial_log_pdf(x.view(-1, self.x_flat), self.n.to(x.device),
+                                  x_alpha, x_beta)
+        l = torch.sum(l, dim=1)
+        p_z = torch.sum(Normal(self.prior_mean, self.prior_std).log_prob(z), dim=1)
+        q_z = torch.sum(Normal(z_mu, z_std).log_prob(z), dim=1)
+        return -torch.mean(l + p_z - q_z) * np.log2(np.e) / self.x_flat, None
+
+    def sample(self, device, epoch, num=64):
+        sample = torch.randn(num, self.latent_dim).to(device)
+        x_alpha, x_beta = self.decode(sample)
+        beta = Beta(x_alpha, x_beta)
+        p = beta.sample()
+        binomial = Binomial(255, p)
+        x_sample = binomial.sample()
+        x_sample = x_sample.float() / 255.
+        save_image(x_sample.view(num, *self.xdim),
+                   'results/epoch_{}_samples.png'.format(epoch))
+
+    def reconstruct(self, x, device, epoch):
+        x = x.view(-1, self.x_flat).float().to(device)
+        z_mu, z_logvar = self.encode(x)
+        z = self.reparameterize(z_mu, z_logvar)  # sample zs
+        x_alpha, x_beta = self.decode(z)
+        beta = Beta(x_alpha, x_beta)
+        p = beta.sample()
+        binomial = Binomial(255, p)
+        x_recon = binomial.sample()
+        x_recon = x_recon.float() / 255.
+        x_with_recon = torch.cat((x, x_recon))
+        save_image(x_with_recon.view(64, *self.xdim),
+                   'results/epoch_{}_recon.png'.format(epoch))
+
+from torch import nn
+
+class BetaBinomial_Conv_VAE(nn.Module):
+    def __init__(self, hparam):
+        super().__init__()
+        h_dim = hparam.h_size
+        self.xdim = hparam.xdim
+        self.x_flat = np.prod(self.xdim)
+
+        self.register_buffer('prior_mean', torch.zeros(1))
+        self.register_buffer('prior_std', torch.ones(1))
+        self.n = torch.ones(hparam.batch_size, *self.xdim) * 255.
+
+        self.conv11 = nn.Conv2d(self.xdim[0], h_dim, 4, 2, 1)
+        self.conv12 = nn.Conv2d(h_dim, h_dim, 3, 1, 1)
+        self.conv13 = nn.Conv2d(h_dim, h_dim, 3, 1, 1)
+        self.conv2 = nn.Conv2d(h_dim, self.xdim[0] * 2, 3, 1, 1)
+        self.conv31 = nn.Conv2d(3, h_dim, 3, 1, 1)
+        self.conv32 = nn.Conv2d(h_dim, h_dim, 3, 1, 1)
+        self.conv33 = nn.Conv2d(h_dim, h_dim, 3, 1, 1)
+        self.conv4 = nn.ConvTranspose2d(h_dim, self.xdim[0] * 2, 4, 2, 1)
+
+        self.best_elbo = np.inf
+        self.logger = None
+
+    def encode(self, x):
+        """Return mu, sigma on latent"""
+        h = x / 255.  # otherwise we will have numerical issues
+        h = self.conv13(self.conv12((self.conv11(h))))
+        h = self.conv2(h)
+        mean, logsd = h.split([self.xdim[0],self.xdim[0]], 1)
+        return mean, torch.exp(logsd)
+
+    def reparameterize(self, mu, std):
+        if self.training:
+            eps = torch.randn_like(std)
+            return eps.mul(std).add_(mu)
+        else:
+            return mu
+
+    def decode(self, z):
+        h = self.conv33(self.conv32((self.conv31(z))))
+        h = self.conv4(h)
+        log_alpha, log_beta= h.split([self.xdim[0],self.xdim[0]], 1)
+        return torch.exp(log_alpha), torch.exp(log_beta)
+
+    def loss(self, x, tag):
+        z_mu, z_std = self.encode(x)
+        z = self.reparameterize(z_mu, z_std)  # sample zs
+
+        x_alpha, x_beta = self.decode(z)
+        l = beta_binomial_log_pdf(x, self.n.to(x.device),
+                                  x_alpha, x_beta)
+        l = torch.sum(l, dim=(1,2,3))
+        p_z = torch.sum(Normal(self.prior_mean, self.prior_std).log_prob(z), dim=(1,2,3))
+        q_z = torch.sum(Normal(z_mu, z_std).log_prob(z), dim=(1,2,3))
+        return -torch.mean(l + p_z - q_z) * np.log2(np.e) / self.x_flat, None
 
 
 class ResNet_VAE(nn.Module):
@@ -570,88 +722,90 @@ class ResNet_VAE(nn.Module):
         self.logger.add_image('x_reconstruct', x_grid, epoch)
 
 
-# class Convolutional_VAE(nn.Module):
-#     def __init__(self, xdim):
-#         super().__init__()
-#         self.z_channel = 32
-#         self.h_size = 160 # Size of resnet block.
-#         self.num_blocks = 4 # Number of resnet blocks for each downsampling layer.
+'''
+class Convolutional_VAE(nn.Module):
+    def __init__(self, xdim):
+        super().__init__()
+        self.z_channel = 32
+        self.h_size = 160 # Size of resnet block.
+        self.num_blocks = 4 # Number of resnet blocks for each downsampling layer.
 
-#         self.xdim = xdim
-#         self.num_pixels = np.prod(self.xdim)
+        self.xdim = xdim
+        self.num_pixels = np.prod(self.xdim)
 
-#         self.best_elbo = np.inf
-#         # self.register_buffer("best_elbo", torch.tensor([float('inf')))
+        self.best_elbo = np.inf
+        # self.register_buffer("best_elbo", torch.tensor([float('inf')))
         
-#         self.logger = None
-#         self.global_step = 0
+        self.logger = None
+        self.global_step = 0
 
-#         # model 
-#         self.dec_log_stdv = nn.Parameter(torch.Tensor([0.]))
-#         self.h_top = nn.Parameter(torch.zeros(self.h_size), requires_grad=True)
+        # model 
+        self.dec_log_stdv = nn.Parameter(torch.Tensor([0.]))
+        self.h_top = nn.Parameter(torch.zeros(self.h_size), requires_grad=True)
 
-#         self.layers = nn.ModuleList([modules.IAFLayer(self.xdim, self.h_size, self.z_channel) 
-#                                      for _ in range(self.num_blocks)])
+        self.layers = nn.ModuleList([modules.IAFLayer(self.xdim, self.h_size, self.z_channel) 
+                                     for _ in range(self.num_blocks)])
         
-#         self.downsample_conv2d = WnConv2d(in_dim = self.xdim[0], 
-#                                           out_dim = self.h_size, 
-#                                           kernel_size = 5, 
-#                                           stride = 2, 
-#                                           padding = 2)
+        self.downsample_conv2d = WnConv2d(in_dim = self.xdim[0], 
+                                          out_dim = self.h_size, 
+                                          kernel_size = 5, 
+                                          stride = 2, 
+                                          padding = 2)
         
-#         self.upsample_deconv2d = WnDeConv2d(in_dim = self.h_size, 
-#                                             out_dim = self.xdim[0], 
-#                                             kernel_size = 4, 
-#                                             stride = 2, 
-#                                             padding = 1)
+        self.upsample_deconv2d = WnDeConv2d(in_dim = self.h_size, 
+                                            out_dim = self.xdim[0], 
+                                            kernel_size = 4, 
+                                            stride = 2, 
+                                            padding = 1)
 
-#     def loss(self, x, tag="train"):
+    def loss(self, x, tag="train"):
 
-#         kl, obj = 0., 0.
+        kl, obj = 0., 0.
 
-#         input = self.preprocess_and_downsample(x)
+        input = self.preprocess_and_downsample(x)
 
-#         for layer in self.layers:
-#             input = layer.up(input)
+        for layer in self.layers:
+            input = layer.up(input)
 
-#         input = self.initialize_input(x.shape).to(x.device)
+        input = self.initialize_input(x.shape).to(x.device)
 
-#         for layer in reversed(self.layers):
-#             input, cur_kl, cur_obj = layer.down(input)
-#             kl  += cur_kl
-#             obj += cur_obj
+        for layer in reversed(self.layers):
+            input, cur_kl, cur_obj = layer.down(input)
+            kl  += cur_kl
+            obj += cur_obj
 
-#         x_out = self.upsample_and_postprocess(input)
+        x_out = self.upsample_and_postprocess(input)
 
-#         logp_x = discretized_logistic(x_out, self.dec_log_stdv, sample=x)
-#         loss = (obj - logp_x).sum() / x.size(0)
-#         elbo = (kl  - logp_x)
-#         bpd  = elbo / (np.log(2.) * self.num_pixels)
+        logp_x = discretized_logistic(x_out, self.dec_log_stdv, sample=x)
+        loss = (obj - logp_x).sum() / x.size(0)
+        elbo = (kl  - logp_x)
+        bpd  = elbo / (np.log(2.) * self.num_pixels)
 
 
-#         self.logger.add_scalar(f'kl/{tag}',              kl.mean(), self.global_step)
-#         self.logger.add_scalar(f'obj/{tag}',            obj.mean(), self.global_step)
-#         self.logger.add_scalar(f'bpd/{tag}',            bpd.mean(), self.global_step)
-#         self.logger.add_scalar(f'elbo/{tag}',          elbo.mean(), self.global_step)
-#         self.logger.add_scalar(f'log p(x|z)/{tag}', -logp_x.mean(), self.global_step)
+        self.logger.add_scalar(f'kl/{tag}',              kl.mean(), self.global_step)
+        self.logger.add_scalar(f'obj/{tag}',            obj.mean(), self.global_step)
+        self.logger.add_scalar(f'bpd/{tag}',            bpd.mean(), self.global_step)
+        self.logger.add_scalar(f'elbo/{tag}',          elbo.mean(), self.global_step)
+        self.logger.add_scalar(f'log p(x|z)/{tag}', -logp_x.mean(), self.global_step)
 
-#         return loss, x_out
+        return loss, x_out
 
-#     def initialize_input(self, size):
-#         return torch.tile(self.h_top.view(1, -1, 1, 1),
-#                          [size[0], 1, size[2] // 2, size[3] // 2])
+    def initialize_input(self, size):
+        return torch.tile(self.h_top.view(1, -1, 1, 1),
+                         [size[0], 1, size[2] // 2, size[3] // 2])
 
-#     def upsample_and_postprocess(self, input):
-#         x = nn.ELU()(input)
-#         x = self.upsample_deconv2d(x)
-#         x = torch.clamp(x, -0.5 + 1 / 512., 0.5 - 1 / 512.)
-#         return x
+    def upsample_and_postprocess(self, input):
+        x = nn.ELU()(input)
+        x = self.upsample_deconv2d(x)
+        x = torch.clamp(x, -0.5 + 1 / 512., 0.5 - 1 / 512.)
+        return x
 
-#     def preprocess_and_downsample(self, x):
-#         x = x.float()
-#         x = torch.clamp((x + 0.5) / 256.0, 0.0, 1.0) - 0.5
-#         h = self.downsample_conv2d(x)  # -> [16, 16]
-#         return h
+    def preprocess_and_downsample(self, x):
+        x = x.float()
+        x = torch.clamp((x + 0.5) / 256.0, 0.0, 1.0) - 0.5
+        h = self.downsample_conv2d(x)  # -> [16, 16]
+        return h
+'''
 
 # git@github.com:pclucas14/iaf-vae.git
 class Convolutional_VAE(nn.Module):
@@ -669,8 +823,8 @@ class Convolutional_VAE(nn.Module):
         self.logger = None
         self.global_step = 0
 
-        self.register_parameter('h', torch.nn.Parameter(torch.zeros(self.h_size)))
-        self.register_parameter('dec_log_stdv', torch.nn.Parameter(torch.Tensor([0.])))
+        self.register_parameter('h', nn.Parameter(torch.zeros(self.h_size)))
+        self.register_parameter('dec_log_stdv', nn.Parameter(torch.Tensor([0.])))
 
         layers = []
         # build network
@@ -688,40 +842,41 @@ class Convolutional_VAE(nn.Module):
         self.first_conv = nn.Conv2d(self.xdim[0], self.h_size, 4, 2, 1)
         self.last_conv = nn.ConvTranspose2d(self.h_size, self.xdim[0], 4, 2, 1)
 
-    def loss(self, input, tag):
+    def loss(self, x, tag):
         # assumes input is \in [-0.5, 0.5] 
-        x = self.first_conv(input)
-        kl, kl_obj = 0., 0.
-
-        h = self.h.view(1, -1, 1, 1)
+        x = torch.clamp((x + 0.5) / 256.0, 0.0, 1.0) - 0.5
+        h = self.first_conv(x)
 
         for layer in self.layers:
             for sub_layer in layer:
-                x = sub_layer.up(x)
+                h = sub_layer.up(h)
 
-        h = h.expand_as(x)
-        self.hid_shape = x[0].size()
+        kl_cost = kl_obj = 0.0
+        self.hid_shape = h[0].size()
+        h = self.h.view(1, -1, 1, 1).expand_as(h)
 
         for layer in reversed(self.layers):
             for sub_layer in reversed(layer):
-                h, cur_kl, cur_obj = sub_layer.down(h)
-                kl     += cur_kl
+                h, cur_obj, cur_cost = sub_layer.down(h)
                 kl_obj += cur_obj
+                kl_cost += cur_cost
 
-        x = F.elu(h)
-        x = self.last_conv(x)
-        x = x.clamp(min=-0.5 + 1. / 512., max=0.5 - 1. / 512.)
+        h = F.elu(h)
+        x_mu = self.last_conv(h)
+        x_mu = x_mu.clamp(min = -0.5 + 1. / 512., max = 0.5 - 1. / 512.)
 
-        log_pxz = discretized_logistic(x, self.dec_log_stdv, sample=input)
-        loss = (kl_obj - log_pxz).sum() / x.size(0)
-        elbo = (kl     - log_pxz)
+        log_pxlz = discretized_logistic(x_mu, self.dec_log_stdv, sample=x)
+        loss = (kl_obj  - log_pxlz).sum() / x.size(0)
+        elbo = (kl_cost - log_pxlz)
         bpd  = elbo / (np.log(2.) * self.num_pixels)
-
-        self.logger.add_scalar(f'kl/{tag}',               kl.mean(), self.global_step)
-        self.logger.add_scalar(f'obj/{tag}',          kl_obj.mean(), self.global_step)
-        self.logger.add_scalar(f'bpd/{tag}',             bpd.mean(), self.global_step)
-        self.logger.add_scalar(f'elbo/{tag}',           elbo.mean(), self.global_step)
-        self.logger.add_scalar(f'log p(x|z)/{tag}', -log_pxz.mean(), self.global_step)
+        # if tag == "test":
+        #     print(f'log_pxlz:{(-log_pxlz).mean() / (np.log(2.) * self.num_pixels)}, bpd:{bpd.mean()}')
+        #     return loss, x
+        self.logger.add_scalar(f'kl/{tag}',           kl_cost.mean(), self.global_step)
+        self.logger.add_scalar(f'obj/{tag}',           kl_obj.mean(), self.global_step)
+        self.logger.add_scalar(f'bpd/{tag}',              bpd.mean(), self.global_step)
+        self.logger.add_scalar(f'elbo/{tag}',            elbo.mean(), self.global_step)
+        self.logger.add_scalar(f'log p(x|z)/{tag}', -log_pxlz.mean(), self.global_step)
 
         return loss, x
 

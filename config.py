@@ -3,19 +3,64 @@ import torch
 
 from utils.discretization import *
 
-class Config_hilloc(object):
+class Config_bbans(object):
     def __init__(self):
-        self.seed=0   # seed for dataset generation
+        self.seed=100   # seed for dataset generation
         self.log_interval=100
         self.eval_freq = 5
 
-        self.device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
-        self.dataset = 'imagenet'#cifar #mnist
+        self.device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+        self.dataset = 'imagenet'#cifar #mnist #imagenet
 
-        self.epochs = 400
-        self.lr=2e-3#2.7e-5 
+        self.epochs = 600
+        self.lr=2e-3
+        self.decay=0.95
+        self.batch_size=32
+
+        self.model_name = "bbans"
+        self.bbc_scheme = 'BBC'
+        self.discretization_method = None
+
+        class Model_hparam:
+            def __init__(self, batch_size, dataset):
+                self.batch_size=batch_size
+                if dataset == "mnist":
+                    self.z_size=50
+                    self.h_size=200
+                else:
+                    self.h_size=128
+                self.xdim = None
+
+        self.model_hparam = Model_hparam(self.batch_size, self.dataset)
+
+        self.model_dir = f'model/params/{self.dataset}'
+        self.model_pt = os.path.join(self.model_dir, f"{self.model_name}_best.pt")
+        self.log_dir = f"model/log/{self.dataset}/{self.model_name}"
+
+        class Compress_hparam:
+            def __init__(self, device):
+                self.prior_precision=8
+                self.obs_precision=14
+                self.q_precision=14
+                self.batch_size = 1
+                self.device = device
+
+        self.compress_hparam = Compress_hparam(self.device)
+
+
+class Config_hilloc(object):
+    def __init__(self):
+        self.seed=199   # seed for dataset generation
+        self.log_interval=500
+        self.eval_freq = 5
+
+        self.device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')#torch.device('cpu')
+        self.dataset = 'cifar'#cifar #mnist #imagenet
+
+        self.epochs = 600
+        self.lr=2e-3
         self.decay=0.995
-        self.batch_size=64#256#64
+        self.batch_size=64
 
         self.model_name = "hilloc"
         self.bbc_scheme = 'BBC'
@@ -23,19 +68,20 @@ class Config_hilloc(object):
 
         class Model_hparam:
             def __init__(self):
-                self.n_blocks=24
+                self.n_blocks=4#24
                 self.depth=1 # should be 1
                 self.z_size=32
                 self.h_size=160
                 self.enable_iaf=False
                 self.free_bits=0.1
+                self.bidirectional = True
                 self.xdim = None
 
         self.model_hparam = Model_hparam()
 
-        self.model_dir = f'params/{self.dataset}'
+        self.model_dir = f'model/params/{self.dataset}'
         self.model_pt = os.path.join(self.model_dir, f"{self.model_name}_best.pt")
-        self.log_dir = f"log/{self.dataset}/{self.model_name}"
+        self.log_dir = f"model/log/{self.dataset}/{self.model_name}"
 
         class Compress_hparam:
             def __init__(self, device):
@@ -44,13 +90,12 @@ class Config_hilloc(object):
                 self.q_precision=18
                 self.batch_size=1
                 self.device = device
+                self.compression_exclude_sizes=False
+                self.n_flif=0   # number of images to compress with FLIF to start the bb chain (bbans mode)
+                self.initial_bits=int(1e5)#1e8  # if n_flif==0 then use a random message with this many bits
 
         self.compress_hparam = Compress_hparam(self.device)
 
-        self.compression_exclude_sizes=False
-        self.n_flif=0   # number of images to compress with FLIF to start the bb chain (bbans mode)
-        self.initial_bits=int(1e8)  # if n_flif==0 then use a random message with this many bits
-        self.mode="train"   # Whether to run 'train' or 'eval' model.
 
 
 class Config_bitswap(object):
@@ -63,9 +108,9 @@ class Config_bitswap(object):
         self.dataset = 'cifar'#'cifar'#'mnist'#'imagenet'
 
         self.epochs = 600
-        self.lr = 2e-3
-        self.decay = 0.99#0.999995  # learning rate decay
-        self.batch_size = 256
+        self.lr = 5e-4
+        self.decay = 1
+        self.batch_size = 64
 
         self.model_name = 'bitswap'
         self.bbc_scheme = 'bitswap'
@@ -85,9 +130,9 @@ class Config_bitswap(object):
         self.model_hparam = Model_hparam()
 
 
-        self.model_dir = f'params/{self.dataset}'
+        self.model_dir = f'model/params/{self.dataset}'
         self.model_pt = os.path.join(self.model_dir, f"{self.model_name}_best.pt")
-        self.log_dir = f"log/{self.dataset}/{self.model_name}"
+        self.log_dir = f"model/log/{self.dataset}/{self.model_name}"
 
         # used in compression stage
         self.ansbits = 31 # ANS precision

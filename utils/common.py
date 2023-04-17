@@ -59,34 +59,46 @@ class ImageNetDataset(Dataset):
 class ToInt:
     def __call__(self, pic):
         return pic * 255
-# set data pre-processing transforms
-transform_ori = transforms.Compose([transforms.ToTensor(), ToInt()])
-transform_ori_28 = transforms.Compose([transforms.Pad(2), transforms.ToTensor(), ToInt()])
-transform_nor = transforms.Compose([transforms.ToTensor(), lambda x : x - 0.5])
-transform_nor_28 = transforms.Compose([transforms.Pad(2), transforms.ToTensor(), lambda x : x - 0.5])
-def load_data(dataset):
-    print("load data")
 
+def load_data(dataset, model_name, load_train=True):
+    # set data pre-processing transforms
+    transform = transforms.Compose([transforms.ToTensor(), ToInt()])
+    transform_28 = transforms.Compose([transforms.Pad(2), transforms.ToTensor(), ToInt()])
+    print("load data")
+    train_set = None
     if dataset == "cifar":
-        train_set = datasets.CIFAR10(root="../data/cifar",  train=True, transform=transform_nor, download=True)
-        test_set  = datasets.CIFAR10(root="../data/cifar", train=False, transform=transform_nor, download=True)
+        if load_train:
+            train_set = datasets.CIFAR10(root="./data/cifar",  train=True, transform=transform, download=True)
+        test_set  = datasets.CIFAR10(root="./data/cifar", train=False, transform=transform, download=True)
     
     elif dataset == "imagenet" or dataset == "imagenetcrop":
-        train_set = ImageNetDataset('../data/imagenet/train_32', transform=transform_ori)
-        test_set  = ImageNetDataset('../data/imagenet/val_32'  , transform=transform_ori)
+        if load_train:
+            train_set = ImageNetDataset('./data/imagenet/train_32', transform=transform)
+        test_set  = ImageNetDataset('./data/imagenet/val_32'  , transform=transform)
     
     elif dataset == "mnist":
-        train_set = datasets.MNIST(root="../data/mnist", train=True, download=True, 
-                                   transform=transform_nor_28
-                                  )
-        test_set = datasets.MNIST(root="../data/mnist", train=False, download=True, 
-                                   transform=transform_nor_28
-                                  )
+        if model_name != 'bbans':
+            transform = transform_28
+        if load_train:
+            train_set = datasets.MNIST(root="./data/mnist", train=True, download=True, 
+                                       transform=transform
+                                      )
+        test_set = datasets.MNIST(root="./data/mnist", train=False, download=True, 
+                                  transform=transform
+                                 )
     return train_set, test_set
 
 
 def load_model(model_name, model_pt, hparam, lr, decay):
     print("load model")
+
+    if model_name == 'bbans':
+        if hparam.xdim[0] == 1:
+            model = BetaBinomialVAE(hparam)
+        else:
+            model = BetaBinomial_Conv_VAE(hparam)
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=decay)
 
     if model_name == 'bitswap':
         model = ResNet_VAE(hparam)

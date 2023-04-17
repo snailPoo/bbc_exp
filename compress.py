@@ -1,31 +1,27 @@
 import numpy as np
-import random
+import time
 import torch
 from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
 
-from bbc_exp.config import *
+from config import *
 from codec.codec import Codec
 from utils.common import same_seed, load_model, load_data
 
 cf = Config_bitswap()
 
 # seed for replicating experiment and stability
-# same_seed(cf.seed)
-np.random.seed(cf.seed)
-random.seed(cf.seed)
-torch.manual_seed(cf.seed)
-torch.cuda.manual_seed(cf.seed)
-torch.backends.cudnn.deterministic = True
+same_seed(cf.seed)
 torch.backends.cudnn.benchmark = True
 
 if __name__ == '__main__':
+    print(f"Model:{cf.model_name}; Dataset:{cf.dataset}")
 
     # ******* data ********
-    train_set, test_set = load_data(cf.dataset)
+    train_set, test_set = load_data(cf.dataset, cf.model_name)
     train_loader = DataLoader(
                     dataset=train_set, 
-                    batch_size=128, 
+                    batch_size=cf.batch_size, 
                     shuffle=True, drop_last=True)
     test_loader = DataLoader(dataset=test_set, 
                              batch_size=cf.compression_batch_size, 
@@ -48,9 +44,20 @@ if __name__ == '__main__':
     state[-1] = state[-1] << 32
     # *********************
 
-    codec = Codec(cf, model, (train_loader, test_loader), state)
+    num_images = test_loader.__len__()
+    codec = Codec(cf, model, (train_loader, test_loader), state, num_images)
+
+    encode_t0 = time.time()
     codec.compress()
+    encode_t = time.time() - encode_t0
+    print("All encoded in {:.2f}s.".format(encode_t))
+    print("Average singe image encoding time: {:.2f}s.".format(encode_t / num_images))
+
+    decode_t0 = time.time()
     decompressed_data = codec.decompress()
+    decode_t = time.time() - decode_t0
+    print('All decoded in {:.2f}s.'.format(decode_t))
+    print("Average singe image decoding time: {:.2f}s.".format(decode_t / num_images))
 
     # check if decompressed_data == original
     datapoints = list(test_loader)

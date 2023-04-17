@@ -33,8 +33,7 @@ def posterior_sampling(cf, model, train_loader):
             z_bin_ends[nz - 1] = zbins.endpoints().numpy()
             z_bin_centres[nz - 1] = zbins.centres().numpy()
 
-            batch_size = 128 # batch size to iterate over
-            num_batch = total_samples // batch_size # number of num_batch
+            num_batch = total_samples // cf.batch_size # number of num_batch
 
             # set-up a batch-loader for the datasetc
             datapoints = list(train_loader)
@@ -55,8 +54,8 @@ def posterior_sampling(cf, model, train_loader):
                 # obtain samples from the generative model
                 iterator = tqdm(range(num_batch), desc=f"sampling z{zi} from generator")
                 for bi in iterator:
-                    gen_from = bi * batch_size
-                    to = gen_from + batch_size
+                    gen_from = bi * cf.batch_size
+                    to = gen_from + cf.batch_size
 
                     mu, scale = model.generate(zi)(given=torch.from_numpy(gen_samples[zi][gen_from: to]).to(cf.device).float())
                     gen_samples[zi - 1][gen_from: to] = sample_from_logistic(mu, scale, mu.shape, device=cf.device, bound=1e-30).cpu()
@@ -67,7 +66,7 @@ def posterior_sampling(cf, model, train_loader):
                 iterator = tqdm(range(num_batch), desc=f"sampling z{zi + 1} from inference model")
                 for bi in iterator:
                     if zi == 0: # z1
-                        given = (datapoints[bi] if cf.dataset == "imagenet" else datapoints[bi][0])
+                        given = datapoints[bi][0]
                     else:
                         given = torch.from_numpy(inf_samples[zi - 1][gen_from: to])
                     mu, scale = model.infer(zi)(given=given.to(cf.device).float())

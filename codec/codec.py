@@ -30,7 +30,7 @@ from utils.torch.rand import ImageBins
         encode z
 '''
 class Codec:
-    def __init__(self, config, model, dataloader, state):
+    def __init__(self, config, model, dataloader, state, num_images):
         self.cf = config
         self.model = model
         self.train_loader, self.test_loader = dataloader
@@ -44,7 +44,7 @@ class Codec:
         self.z_bin = self.cf.discretization(self.cf, self.model, self.train_loader)
         xbin = ImageBins(self.cf.type, self.cf.device, self.total_xdim)
         self.x_bin = xbin.endpoints(), xbin.centres()
-        self.num_data = 1000# self.test_loader.__len__()
+        self.num_data = num_images
 
     def compress(self):
         reswidth = 252 # why?

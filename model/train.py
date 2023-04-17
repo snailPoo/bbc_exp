@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from utils.common import same_seed, load_model, load_data
 from config import *
 
-cf = Config_hilloc()#Config_bitswap #Config_hilloc
+cf = Config_hilloc()# Config_bbans # Config_bitswap # Config_hilloc
 
 _INIT_ENABLED = False
 @contextmanager
@@ -156,11 +156,13 @@ def count_num_params(model):
 
 
 if __name__ == '__main__':
+    print(f"Model:{cf.model_name}; Dataset:{cf.dataset}")
+
     # Set seed for reproducibility
     same_seed(cf.seed)
 
     # set up dataloader
-    train_set, test_set = load_data(cf.dataset)
+    train_set, test_set = load_data(cf.dataset, cf.model_name)
     kwargs = {"num_workers": 4, "pin_memory": True} if torch.cuda.is_available() else {}
     train_loader = DataLoader(
         dataset=train_set, 
@@ -177,7 +179,7 @@ if __name__ == '__main__':
                                              cf.model_hparam, cf.lr, cf.decay)
     # create loggers
     model.logger = SummaryWriter(log_dir=cf.log_dir)
-    
+
     model.to(cf.device)
     count_num_params(model)
 

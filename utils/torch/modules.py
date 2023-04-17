@@ -3,15 +3,14 @@ from contextlib import contextmanager
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Parameter, Sequential, Dropout, ELU
 from torch.nn import init
-from PIL import Image
 import os
 import torch
 import numpy as np
-from torch.utils.data import Dataset
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.utils.weight_norm as wn
 import torch.distributions as D
+from utils.distributions import DiagonalGaussian
 
 _WN_INIT_STDV = 0.05
 _SMALL = 1e-10
@@ -115,73 +114,77 @@ class WnConv2d(WnModule):
     def extra_repr(self):
         return 'in_dim={}, out_dim={}, kernel_size={}, stride={}, padding={}, init_scale={}, loggain={}'.format(self.in_dim, self.out_dim, self.kernel_size, self.stride, self.padding, self.init_scale, self.loggain)
 
-# class WnDeConv2d(WnModule):
-#     def __init__(self, in_dim, out_dim, kernel_size, stride, padding, init_scale=1.0, loggain=True, bias=True, mask=None):
-#         super().__init__()
-#         self.in_dim, self.out_dim, self.kernel_size, self.stride, self.padding = in_dim, out_dim, kernel_size, stride, padding
-#         self.bias = bias
-#         self.init_scale = init_scale
-#         self.loggain = loggain
-#         self.v = Parameter(torch.Tensor(in_dim, out_dim, self.kernel_size, self.kernel_size))
-#         self.gain = Parameter(torch.Tensor(out_dim))
-#         self.b = Parameter(torch.Tensor(out_dim), requires_grad=True if self.bias else False)
+'''
+class WnDeConv2d(WnModule):
+    def __init__(self, in_dim, out_dim, kernel_size, stride, padding, init_scale=1.0, loggain=True, bias=True, mask=None):
+        super().__init__()
+        self.in_dim, self.out_dim, self.kernel_size, self.stride, self.padding = in_dim, out_dim, kernel_size, stride, padding
+        self.bias = bias
+        self.init_scale = init_scale
+        self.loggain = loggain
+        self.v = Parameter(torch.Tensor(in_dim, out_dim, self.kernel_size, self.kernel_size))
+        self.gain = Parameter(torch.Tensor(out_dim))
+        self.b = Parameter(torch.Tensor(out_dim), requires_grad=True if self.bias else False)
 
-#         init.normal_(self.v, 0., _WN_INIT_STDV)
-#         if self.loggain:
-#             init.zeros_(self.gain)
-#         else:
-#             init.ones_(self.gain)
-#         init.zeros_(self.b)
+        init.normal_(self.v, 0., _WN_INIT_STDV)
+        if self.loggain:
+            init.zeros_(self.gain)
+        else:
+            init.ones_(self.gain)
+        init.zeros_(self.b)
 
-#         if mask is not None:
-#             self.v = mask * self.v
+        if mask is not None:
+            self.v = mask * self.v
 
-#     def _init(self, x):
-#         # calculate unnormalized activations
-#         y_bchw = self._forward(x)
-#         assert len(y_bchw.shape) == 4 and y_bchw.shape[:2] == (x.shape[0], self.out_dim)
+    def _init(self, x):
+        # calculate unnormalized activations
+        y_bchw = self._forward(x)
+        assert len(y_bchw.shape) == 4 and y_bchw.shape[:2] == (x.shape[0], self.out_dim)
 
-#         # set g and b so that activations are normalized
-#         y_c = y_bchw.transpose(0, 1).reshape(self.out_dim, -1)
-#         m = y_c.mean(dim=1)
-#         s = self.init_scale / (y_c.std(dim=1) + _SMALL)
-#         assert m.shape == s.shape == self.gain.shape == self.b.shape
+        # set g and b so that activations are normalized
+        y_c = y_bchw.transpose(0, 1).reshape(self.out_dim, -1)
+        m = y_c.mean(dim=1)
+        s = self.init_scale / (y_c.std(dim=1) + _SMALL)
+        assert m.shape == s.shape == self.gain.shape == self.b.shape
 
-#         if self.loggain:
-#             loggain = torch.clamp(torch.log(s), min=-10., max=None)
-#             self.gain.data.copy_(loggain)
-#         else:
-#             self.gain.data.copy_(s)
+        if self.loggain:
+            loggain = torch.clamp(torch.log(s), min=-10., max=None)
+            self.gain.data.copy_(loggain)
+        else:
+            self.gain.data.copy_(s)
 
-#         if self.bias:
-#             self.b.data.sub_(m * s)
+        if self.bias:
+            self.b.data.sub_(m * s)
 
-#         # forward pass again, now normalized
-#         return self._forward(x)
+        # forward pass again, now normalized
+        return self._forward(x)
 
-#     def _forward(self, x):
-#         if self.loggain:
-#             g = softplus(self.gain)
-#         else:
-#             g = self.gain
+    def _forward(self, x):
+        if self.loggain:
+            g = softplus(self.gain)
+        else:
+            g = self.gain
 
-#         vnorm = self.v.view(self.out_dim, -1).norm(p=2, dim=1)
-#         assert vnorm.shape == self.gain.shape == self.b.shape
-#         w = self.v * (g / (vnorm + _SMALL)).view(1, self.out_dim, 1, 1)
-#         return F.conv_transpose2d(x, w, self.b, stride=self.stride, padding=self.padding)
+        vnorm = self.v.view(self.out_dim, -1).norm(p=2, dim=1)
+        assert vnorm.shape == self.gain.shape == self.b.shape
+        w = self.v * (g / (vnorm + _SMALL)).view(1, self.out_dim, 1, 1)
+        return F.conv_transpose2d(x, w, self.b, stride=self.stride, padding=self.padding)
 
-#     def extra_repr(self):
-#         return 'in_dim={}, out_dim={}, kernel_size={}, stride={}, padding={}, init_scale={}, loggain={}'.format(self.in_dim, self.out_dim, self.kernel_size, self.stride, self.padding, self.init_scale, self.loggain)
+    def extra_repr(self):
+        return 'in_dim={}, out_dim={}, kernel_size={}, stride={}, padding={}, init_scale={}, loggain={}'.format(self.in_dim, self.out_dim, self.kernel_size, self.stride, self.padding, self.init_scale, self.loggain)
+'''
 
 class IAFLayer(nn.Module):
     def __init__(self, hparam, downsample):
         super(IAFLayer, self).__init__()
         
-        self.z_size     = hparam.z_size
-        self.h_size     = hparam.h_size
-        self.enable_iaf = hparam.enable_iaf
-        self.free_bits  = hparam.free_bits
-        self.ds         = downsample
+        self.z_size        = hparam.z_size
+        self.h_size        = hparam.h_size
+        self.enable_iaf    = hparam.enable_iaf
+        self.free_bits     = hparam.free_bits
+        # posterior is bidirectional - i.e. has a deterministic upper pass but top down sampling.
+        self.bidirectional = hparam.bidirectional # True for bidirectional, False for bottom-up inference
+        self.ds            = downsample
 
         if downsample:
             stride, padding, filter_size = 2, 1, 4
@@ -220,19 +223,30 @@ class IAFLayer(nn.Module):
         x = self.down_conv_a(x)
         
         pz_mean, pz_logsd, rz_mean, rz_logsd, down_context, h_det = x.split([self.z_size] * 4 + [self.h_size] * 2, 1)
-        prior = D.Normal(pz_mean, torch.exp(pz_logsd))
+        # prior = D.Normal(pz_mean, torch.exp(pz_logsd))
+        prior = DiagonalGaussian(pz_mean, 2 * pz_logsd)
             
         if sample:
-            z = prior.rsample()
-            kl = kl_obj = torch.zeros(input.size(0)).to(input.device)
+            # z = prior.rsample()
+            z = prior.sample
+            kl_cost = kl_obj = torch.zeros(input.size(0)).to(input.device)
         else:
-            posterior = D.Normal(rz_mean + self.qz_mean, torch.exp(rz_logsd + self.qz_logsd))
+            if not self.bidirectional:
+                rz_mean = rz_logsd = 0
+
+            # posterior = D.Normal(rz_mean + self.qz_mean, torch.exp(rz_logsd + self.qz_logsd))
+            posterior = DiagonalGaussian(self.qz_mean + rz_mean, 2 * (self.qz_logsd + rz_logsd))
             
-            z = posterior.rsample()
-            logqs = posterior.log_prob(z) 
-            context = self.up_context + down_context
+            # z = posterior.rsample()
+            # logqs = posterior.log_prob(z) 
+            # logps = prior.log_prob(z) 
+            z = posterior.sample
+            logqs = posterior.logps(z)
+            logps = prior.logps(z)
+            # print(f'train log_q:{logqs.sum(dim=(1,2,3)).mean().item() / (np.log(2.) * 3072)}, log_p:{(-logps).sum(dim=(1,2,3)).mean().item() / (np.log(2.) * 3072)}')
 
             if self.enable_iaf:
+                context = self.up_context + down_context
                 x = self.down_ar_conv(z, context) 
                 arw_mean, arw_logsd = x[0] * 0.1, x[1] * 0.1
                 z = (z - arw_mean) / torch.exp(arw_logsd)
@@ -240,17 +254,19 @@ class IAFLayer(nn.Module):
                 # the density at the new point is the old one + determinant of transformation
                 logqs += arw_logsd
 
-            logps = prior.log_prob(z) 
-            kl = logqs - logps
-
+            kl_cost = logqs - logps
+            # print(f'{pz_mean=} {pz_logsd=}')
+            # print(f'{self.qz_mean=} {self.qz_logsd=}')
+            # print(f'{rz_mean=} {rz_logsd=}')
+            print(f'log_q:{logqs.sum(dim=(1,2,3)).mean() / (np.log(2.) * 3072)}, log_p:{(-logps).sum(dim=(1,2,3)).mean() / (np.log(2.) * 3072)}')
             # free bits (doing as in the original repo, even if weird)
-            kl_obj = kl.sum(dim=(-2, -1)).mean(dim=0, keepdim=True)
+            kl_obj = kl_cost.sum(dim=(-2, -1)).mean(dim=0, keepdim=True)
             kl_obj = kl_obj.clamp(min=self.free_bits)
-            kl_obj = kl_obj.expand(kl.size(0), -1)
+            kl_obj = kl_obj.expand(kl_cost.size(0), -1)
             kl_obj = kl_obj.sum(dim=1)
 
             # sum over all the dimensions, but the batch
-            kl = kl.sum(dim=(1,2,3))
+            kl_cost = kl_cost.sum(dim=(1,2,3))
 
         h = torch.cat((z, h_det), 1)
         h = F.elu(h)
@@ -260,103 +276,104 @@ class IAFLayer(nn.Module):
         
         h = self.down_conv_b(h)
 
-        return input + 0.1 * h, kl, kl_obj 
+        return input + 0.1 * h, kl_obj, kl_cost
 
+'''
+class IAFLayer(nn.Module):
+    def __init__(self, xdim, h_size, z_channel):
+        super().__init__()
+        self.z_channel = z_channel
+        self.h_size = h_size # Size of resnet block.
 
-# class IAFLayer(nn.Module):
-#     def __init__(self, xdim, h_size, z_channel):
-#         super().__init__()
-#         self.z_channel = z_channel
-#         self.h_size = h_size # Size of resnet block.
+        # posterior is bidirectional - i.e. has a deterministic upper pass but top down sampling.
+        self.bidirectional = True # True for bidirectional, False for bottom-up inference
+        # self.enable_iaf = False # True for IAF, False for Gaussian posterior
+        self.kl_min = torch.tensor(0.1) # Number of "free bits/nats".
 
-#         # posterior is bidirectional - i.e. has a deterministic upper pass but top down sampling.
-#         self.bidirectional = True # True for bidirectional, False for bottom-up inference
-#         # self.enable_iaf = False # True for IAF, False for Gaussian posterior
-#         self.kl_min = torch.tensor(0.1) # Number of "free bits/nats".
+        self.act = nn.ELU()
 
-#         self.act = nn.ELU()
-
-#         self.in_dim = xdim[0]
-#         self.up_split_conv2d   = WnConv2d(in_dim = self.h_size, 
-#                                           out_dim = 2 * self.z_channel + 2 * self.h_size, 
-#                                           kernel_size = 3, 
-#                                           stride = 1, 
-#                                           padding = 1)
+        self.in_dim = xdim[0]
+        self.up_split_conv2d   = WnConv2d(in_dim = self.h_size, 
+                                          out_dim = 2 * self.z_channel + 2 * self.h_size, 
+                                          kernel_size = 3, 
+                                          stride = 1, 
+                                          padding = 1)
         
-#         self.up_merge_conv2d   = WnConv2d(in_dim = self.h_size, 
-#                                           out_dim = self.h_size, 
-#                                           kernel_size = 3, 
-#                                           stride = 1, 
-#                                           padding = 1)
+        self.up_merge_conv2d   = WnConv2d(in_dim = self.h_size, 
+                                          out_dim = self.h_size, 
+                                          kernel_size = 3, 
+                                          stride = 1, 
+                                          padding = 1)
         
-#         self.down_split_conv2d = WnConv2d(in_dim = self.h_size, 
-#                                           out_dim = 4 * self.z_channel + 2 * self.h_size,
-#                                           kernel_size = 3, 
-#                                           stride = 1, 
-#                                           padding = 1)
+        self.down_split_conv2d = WnConv2d(in_dim = self.h_size, 
+                                          out_dim = 4 * self.z_channel + 2 * self.h_size,
+                                          kernel_size = 3, 
+                                          stride = 1, 
+                                          padding = 1)
         
-#         self.down_merge_conv2d = WnConv2d(in_dim = self.h_size + self.z_channel, 
-#                                           out_dim = self.h_size, 
-#                                           kernel_size = 3, 
-#                                           stride = 1, 
-#                                           padding = 1)
+        self.down_merge_conv2d = WnConv2d(in_dim = self.h_size + self.z_channel, 
+                                          out_dim = self.h_size, 
+                                          kernel_size = 3, 
+                                          stride = 1, 
+                                          padding = 1)
 
 
-#     def up(self, input, **_):
-#         self.qz_mean, self.qz_logsd, self.up_context, h = self.up_split(input)
-#         return self.up_merge(h, input)
+    def up(self, input, **_):
+        self.qz_mean, self.qz_logsd, self.up_context, h = self.up_split(input)
+        return self.up_merge(h, input)
 
-#     def up_split(self, input):
-#         x = self.act(input)
-#         x = self.up_split_conv2d(x)
-#         return torch.split(x, [self.z_channel] * 2 + [self.h_size] * 2, dim=1)
+    def up_split(self, input):
+        x = self.act(input)
+        x = self.up_split_conv2d(x)
+        return torch.split(x, [self.z_channel] * 2 + [self.h_size] * 2, dim=1)
 
-#     def up_merge(self, h, input):
-#         h = nn.ELU()(h)
-#         h = self.up_merge_conv2d(h)
-#         return input + 0.1 * h
+    def up_merge(self, h, input):
+        h = nn.ELU()(h)
+        h = self.up_merge_conv2d(h)
+        return input + 0.1 * h
 
-#     def down(self, input):
-#         h_det, posterior, prior, ar_context = self.down_split(
-#             input, self.qz_mean, self.qz_logsd, self.up_context)
+    def down(self, input):
+        h_det, posterior, prior, ar_context = self.down_split(
+            input, self.qz_mean, self.qz_logsd, self.up_context)
 
-#         z = posterior.sample
-#         logqs = posterior.logps(z)
+        z = posterior.sample
+        logqs = posterior.logps(z)
 
-#         logps = prior.logps(z)
+        logps = prior.logps(z)
 
-#         kl = logqs - logps
+        kl = logqs - logps
 
-#         # free bits
-#         kl_obj = kl.sum(dim=(-2, -1)).mean(dim=0, keepdim=True)
-#         kl_obj = kl_obj.clamp(min=self.kl_min.to(kl_obj.device))
-#         kl_obj = kl_obj.expand(kl.size(0), -1)
-#         kl_obj = kl_obj.sum(dim=1)
+        # free bits
+        kl_obj = kl.sum(dim=(-2, -1)).mean(dim=0, keepdim=True)
+        kl_obj = kl_obj.clamp(min=self.kl_min.to(kl_obj.device))
+        kl_obj = kl_obj.expand(kl.size(0), -1)
+        kl_obj = kl_obj.sum(dim=1)
 
-#         # sum over all the dimensions, but the batch
-#         kl = kl.sum(dim=(1,2,3))
+        # sum over all the dimensions, but the batch
+        kl = kl.sum(dim=(1,2,3))
 
 
-#         return self.down_merge(h_det, input, z), kl, kl_obj 
+        return self.down_merge(h_det, input, z), kl, kl_obj 
 
-#     def down_split(self, input, qz_mean, qz_logsd, up_context):
-#         x = self.act(input)
-#         x = self.down_split_conv2d(x)
+    def down_split(self, input, qz_mean, qz_logsd, up_context):
+        x = self.act(input)
+        x = self.down_split_conv2d(x)
 
-#         pz_mean, pz_logsd, rz_mean, rz_logsd, down_context, h_det = torch.split(x, [self.z_channel] * 4 + [self.h_size] * 2, dim=1)
+        pz_mean, pz_logsd, rz_mean, rz_logsd, down_context, h_det = torch.split(x, [self.z_channel] * 4 + [self.h_size] * 2, dim=1)
         
-#         prior = DiagonalGaussian(pz_mean, 2 * pz_logsd)
-#         posterior = DiagonalGaussian(
-#             qz_mean + (rz_mean if self.bidirectional else 0),
-#             2 * (qz_logsd + (rz_logsd if self.bidirectional else 0)))
+        prior = DiagonalGaussian(pz_mean, 2 * pz_logsd)
+        posterior = DiagonalGaussian(
+            qz_mean + (rz_mean if self.bidirectional else 0),
+            2 * (qz_logsd + (rz_logsd if self.bidirectional else 0)))
         
-#         return h_det, posterior, prior, up_context + down_context
+        return h_det, posterior, prior, up_context + down_context
 
-#     def down_merge(self, h_det, input, z):
-#         h = torch.cat([z, h_det], dim=1)
-#         h = self.act(h)
-#         h = self.down_merge_conv2d(h)
-#         return input + 0.1 * h
+    def down_merge(self, h_det, input, z):
+        h = torch.cat([z, h_det], dim=1)
+        h = self.act(h)
+        h = self.down_merge_conv2d(h)
+        return input + 0.1 * h
+'''
 
 
 # taken from https://github.com/jzbontar/pixelcnn-pytorch
