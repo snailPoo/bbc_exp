@@ -31,20 +31,22 @@ def warmup(model, data_loader, warmup_batches):
 
     # prepare initialization batch
     for batch_idx, (x, _) in enumerate(data_loader):
-        # stack image with to current stack
-        warmup_images = torch.cat((warmup_images, x), dim=0) \
-            if batch_idx != 0 else x
-
+        # # stack image with to current stack
+        # warmup_images = torch.cat((warmup_images, x), dim=0) \
+        #     if batch_idx != 0 else x
+        # do one 'special' forward pass to initialize parameters
+        with init_mode():
+            elbo, _ = model.loss(x.to(cf.device), 'warmup')
         # stop stacking batches if reaching limit
         if batch_idx + 1 == warmup_batches:
             break
 
     # set the stack to current device
-    warmup_images = warmup_images.to(cf.device)
+    # warmup_images = warmup_images.to(cf.device)
 
-    # do one 'special' forward pass to initialize parameters
-    with init_mode():
-        elbo, _ = model.loss(warmup_images, 'warmup')
+    # # do one 'special' forward pass to initialize parameters
+    # with init_mode():
+    #     elbo, _ = model.loss(warmup_images, 'warmup')
 
     print(f'====> Epoch: 0 Average loss: {elbo:.4f}')
 
