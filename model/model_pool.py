@@ -962,19 +962,21 @@ class Simple_SHVC(nn.Module):
 									      kernel_size=4, stride=2, padding=1))
 		self.lamb = 0.1
 		self.nat2bit = np.log2(np.e)
-		self.num_bits = np.prod(hparam.xdim)
+		self.num_pixels = np.prod(hparam.xdim)
+		self.logger = None
+		self.best_elbo = np.inf
 		# self.c_prior = ChannelPriorMultiScale(batch_size,3,32,32,L,mog=False,dp_rate=0,num_layers=3,hidden_size=32)
 		
 
 	def loss(self, x, tag):
 		batch_size = x.shape[0]
 		x = modules.lossless_downsample(x)
-		init_save = log_p = log_q = torch.Tensor([0.] * batch_size)
+		init_save = log_p = log_q = torch.Tensor([0.] * batch_size).to(x.device)
 		
 		# encode x_i ~ p(x_i|x_1:i-1), i = 12, ..., s+1
 		for i in range(1, self.z_dim[0]-int(self.s)+1):
 			y = x[:, -i, :, :].unsqueeze(1)
-			pad = torch.zeros((batch_size, self.z_dim[1] + (i - 1), self.H >> 1, self.W >> 1))
+			pad = torch.zeros((batch_size, self.z_dim[1] + (i - 1), self.H >> 1, self.W >> 1)).to(x.device)
 			h = torch.cat((x[:, :-i, :, :], pad), dim=1)
 			# mu_xi, logsd_xi = torch.split(self.p_x_given_ARx_z1(h), 5, dim=1)
 			# p_xi = Logistic_Mixture(mu_xi, logsd_xi)
@@ -984,7 +986,7 @@ class Simple_SHVC(nn.Module):
 			log_p += channel_save
 
 		# decode z^1 ~ p(z^1|x_1:s)
-		pad = torch.zeros((batch_size, self.z_dim[0]-int(self.s)-1, self.H >> 1, self.W >> 1))
+		pad = torch.zeros((batch_size, self.z_dim[0]-int(self.s)-1, self.H >> 1, self.W >> 1)).to(x.device)
 		h = torch.cat((x[:, :-int(self.s), :, :], pad), dim=1)
 		mu_z, logsd_z = torch.split(self.q_z1_given_x(h), self.z_dim[1], dim=1)
 		# q_z = Logistic(mu_z, logsd_z)
@@ -998,7 +1000,7 @@ class Simple_SHVC(nn.Module):
 		up_z1 = self.z_up(z1)
 		for i in range(int(self.s), 0, -1):
 			y = x[:, i, :, :].unsqueeze(1)
-			pad = torch.zeros((batch_size, self.z_dim[0] - i - 1, self.H >> 1, self.W >> 1))
+			pad = torch.zeros((batch_size, self.z_dim[0] - i - 1, self.H >> 1, self.W >> 1)).to(x.device)
 			h = torch.cat((x[:, :i, :, :], pad, up_z1), dim=1)
 			# mu_xi, logsd_xi = torch.split(self.p_x_given_ARx_z1(h), 5, dim=1)
 			# p_xi = Logistic_Mixture(mu_xi, logsd_xi)
@@ -1038,7 +1040,7 @@ class Simple_SHVC(nn.Module):
 		for i in range(1, self.z_dim[3]):
 			y = z3[:, -i, :, :]
 			if i > 1:
-				pad = torch.zeros((batch_size, i - 1, self.H >> 4, self.W >> 4))
+				pad = torch.zeros((batch_size, i - 1, self.H >> 4, self.W >> 4)).to(x.device)
 				h = torch.cat((z3[:, :-i, :, :], pad), dim=1)
 			else:
 				h = z3[:, :-i, :, :]
@@ -1047,6 +1049,6 @@ class Simple_SHVC(nn.Module):
 			# log_p += p_z3.prob(y)
 			log_p += torch.sum(random.logistic_logp(mu_z, logsd_z, y), dim=(1,2))
 
-		loss = torch.mean(log_q - log_p) * self.nat2bit / self.num_bits + self.lamb * torch.mean(torch.max(torch.tensor(0.), - init_cost + init_save))
+		loss = torch.mean(log_q - log_p) * self.nat2bit / self.num_pixels + self.lamb * torch.mean(torch.max(torch.tensor(0.), - init_cost + init_save))
 
 		return loss, None

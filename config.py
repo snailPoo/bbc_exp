@@ -105,7 +105,7 @@ class Config_hilloc(object):
         self.eval_freq = 5
 
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')#torch.device('cpu')
-        self.dataset = 'mnist'#cifar #mnist #imagenet
+        self.dataset = 'mnist'#cifar #mnist #imagenet #imagenet_full
 
         self.epochs = 600
         self.lr=2e-3
@@ -153,13 +153,13 @@ class Config_shvc(object):
         self.log_interval=500
         self.eval_freq = 5
 
-        self.device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')#torch.device('cpu')
+        self.device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')#torch.device('cpu')
         self.dataset = 'cifar'#cifar #mnist #imagenet
 
         self.epochs = 1000
         self.lr=5e-4
         self.decay=0.9961
-        self.batch_size=1
+        self.batch_size=64
 
         self.model_name = "shvc"
         self.bbc_scheme = 'bitswap'
