@@ -111,6 +111,11 @@ def load_model(model_name, model_pt, hparam, lr, decay):
         optimizer = optim.Adamax(model.parameters(), lr=lr)
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=decay)
 
+    elif model_name == 'shvc':
+        model = Simple_SHVC(hparam)
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+        scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=decay, last_epoch=- 1, verbose=True)
+
     if os.path.exists(model_pt):
         print('load pre-trained weights')
         param = torch.load(model_pt, map_location=torch.device('cpu'))

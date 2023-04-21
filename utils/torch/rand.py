@@ -62,6 +62,97 @@ def discretized_logistic_logp(mu, scale, x):
     logp = logps.flatten(1)
     return logp
 
+
+def log_prob_from_logits(x):
+    """ numerically stable log_softmax implementation that prevents overflow """
+    axis = len(x.shape)-1
+    m, _ = torch.max(x, dim=axis, keepdim=True)
+    return x - m - torch.log(torch.sum(torch.exp(x-m), dim=axis, keepdim=True))
+
+def log_sum_exp(x):
+    """ numerically stable log_sum_exp implementation that prevents overflow """
+    axis = len(x.shape)-1
+    m, _ = torch.max(x, dim=axis)
+    m2, _ = torch.max(x, dim=axis, keepdim=True)
+    return m + torch.log(torch.sum(torch.exp(x-m2), dim=axis))
+
+def discretized_mix_logistic_logp(x, l):
+    """ log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval """
+    # [0,255] -> [-1.1] (this means bin sizes of 2./255.)
+    x = (x - 127.5) / 127.5
+    x = x.permute(0, 2, 3, 1) # x:(B, C, H, W) -> (B, H, W, C)
+    l = l.permute(0, 2, 3, 1) # l:(B, C * (3 * nr_mix), H, W) -> (B, H, W, C * (3 * nr_mix))
+    xs = list(x.size()) # true image (i.e. labels) to regress to, e.g. (B,32,32,3)
+    ls = list(l.size()) # predicted distribution, e.g. (B,32,32,100)
+
+    assert (ls[-1]/xs[-1]) % 3 == 0, \
+        f"Error: Invalid shape: {ls}. Expected [batch_size, 3 * num_mixtures * C, H, W]"
+
+    nr_mix = int((ls[-1]/xs[-1]) / 3)
+    l = l.reshape(xs + [3 * nr_mix]) # (B, H, W, C, (3 * nr_mix))
+
+    # below: unpacking the params of the mixture of logistics
+    logit_probs, means, log_scales = torch.split(l, nr_mix, dim=-1) # (B, H, W, C, nr_mix)
+    log_scales = torch.clamp(log_scales, -7.)
+
+    # below: getting the means and adjusting them based on preceding sub-pixels
+    x = x.unsqueeze(-1).repeat(1, 1, 1, 1, nr_mix)
+    
+    centered_x = x - means
+    inv_stdv = torch.exp(-log_scales)
+    
+    plus_in = inv_stdv * (centered_x + 1./255.)
+    cdf_plus = torch.sigmoid(plus_in)
+    min_in = inv_stdv * (centered_x - 1./255.)
+    cdf_min = torch.sigmoid(min_in)
+
+    # log probability for edge case of 0 (before scaling)
+    log_cdf_plus = plus_in - modules.softplus(plus_in)
+    # log probability for edge case of 255 (before scaling)
+    log_one_minus_cdf_min = - modules.softplus(min_in)
+    # probability for all other cases
+    cdf_delta = cdf_plus - cdf_min
+    mid_in = inv_stdv * centered_x
+    # log probability in the center of the bin, to be used in extreme cases (not actually used in our code)
+    log_pdf_mid = mid_in - log_scales - 2. * modules.softplus(mid_in)
+    
+    # now select the right output: left edge case, right edge case, normal case, extremely low prob case (doesn't actually happen for us)
+    log_probs = torch.where(x < -0.999, log_cdf_plus, 
+                            torch.where(x > 0.999, log_one_minus_cdf_min, 
+                                        torch.where(cdf_delta > 1e-5, 
+                                                    torch.log(torch.clamp(cdf_delta, min=1e-12, max=None)), 
+                                                    log_pdf_mid - np.log(127.5))))
+    
+    log_probs = log_probs + log_prob_from_logits(logit_probs)
+    
+    # return -torch.sum(log_sum_exp(log_probs),dim=tuple(range(1,len(xs))))
+    return log_sum_exp(log_probs).flatten(1)
+
+
+# def sample_from_discretized_mix_logistic(l, nr_mix):
+#     ls = l.shape
+#     xs = ls[:-1] + (3,)
+#     # unpack parameters
+#     logit_probs = l[..., :nr_mix]
+#     l = l[..., nr_mix:].reshape(xs + (nr_mix*3,))
+#     # sample mixture indicator from softmax
+#     sel = F.one_hot(torch.argmax(logit_probs - torch.log(-torch.log(torch.rand_like(logit_probs) * (1 - 2e-5) + 1e-5)), dim=3), num_classes=nr_mix).float()
+#     sel = sel.reshape(xs[:-1] + (1, nr_mix))
+#     # select logistic parameters
+#     means = (l[..., :nr_mix] * sel).sum(dim=4)
+#     log_scales = torch.clamp((l[..., nr_mix:2*nr_mix] * sel).sum(dim=4), min=-7.)
+#     coeffs = torch.tanh(l[..., 2*nr_mix:3*nr_mix]) * sel
+#     coeffs = coeffs.sum(dim=4)
+#     # sample from logistic & clip to interval
+#     # we don't actually round to the nearest 8bit value when sampling
+#     u = torch.rand_like(means) * (1 - 2e-5) + 1e-5
+#     x = means + torch.exp(log_scales) * (torch.log(u) - torch.log(1 - u))
+#     x0 = torch.clamp(x[..., 0], min=-1., max=1.)
+#     x1 = torch.clamp(x[..., 1] + coeffs[..., 0] * x0, min=-1., max=1.)
+#     x2 = torch.clamp(x[..., 2] + coeffs[..., 1] * x0 + coeffs[..., 2] * x1, min=-1., max=1.)
+#     return torch.cat([x0.unsqueeze(-1), x1.unsqueeze(-1), x2.unsqueeze(-1)], dim=3)
+
+
 # function to calculate the CDF of the Logistic(mu, scale) distribution evaluated under x
 def logistic_cdf(x, mu, scale):
     return torch.sigmoid((x - mu) / scale)

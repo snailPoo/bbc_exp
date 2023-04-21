@@ -1,6 +1,5 @@
 from contextlib import contextmanager
 
-import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Parameter, Sequential, Dropout, ELU
 from torch.nn import init
 import os
@@ -114,65 +113,6 @@ class WnConv2d(WnModule):
     def extra_repr(self):
         return 'in_dim={}, out_dim={}, kernel_size={}, stride={}, padding={}, init_scale={}, loggain={}'.format(self.in_dim, self.out_dim, self.kernel_size, self.stride, self.padding, self.init_scale, self.loggain)
 
-'''
-class WnDeConv2d(WnModule):
-    def __init__(self, in_dim, out_dim, kernel_size, stride, padding, init_scale=1.0, loggain=True, bias=True, mask=None):
-        super().__init__()
-        self.in_dim, self.out_dim, self.kernel_size, self.stride, self.padding = in_dim, out_dim, kernel_size, stride, padding
-        self.bias = bias
-        self.init_scale = init_scale
-        self.loggain = loggain
-        self.v = Parameter(torch.Tensor(in_dim, out_dim, self.kernel_size, self.kernel_size))
-        self.gain = Parameter(torch.Tensor(out_dim))
-        self.b = Parameter(torch.Tensor(out_dim), requires_grad=True if self.bias else False)
-
-        init.normal_(self.v, 0., _WN_INIT_STDV)
-        if self.loggain:
-            init.zeros_(self.gain)
-        else:
-            init.ones_(self.gain)
-        init.zeros_(self.b)
-
-        if mask is not None:
-            self.v = mask * self.v
-
-    def _init(self, x):
-        # calculate unnormalized activations
-        y_bchw = self._forward(x)
-        assert len(y_bchw.shape) == 4 and y_bchw.shape[:2] == (x.shape[0], self.out_dim)
-
-        # set g and b so that activations are normalized
-        y_c = y_bchw.transpose(0, 1).reshape(self.out_dim, -1)
-        m = y_c.mean(dim=1)
-        s = self.init_scale / (y_c.std(dim=1) + _SMALL)
-        assert m.shape == s.shape == self.gain.shape == self.b.shape
-
-        if self.loggain:
-            loggain = torch.clamp(torch.log(s), min=-10., max=None)
-            self.gain.data.copy_(loggain)
-        else:
-            self.gain.data.copy_(s)
-
-        if self.bias:
-            self.b.data.sub_(m * s)
-
-        # forward pass again, now normalized
-        return self._forward(x)
-
-    def _forward(self, x):
-        if self.loggain:
-            g = softplus(self.gain)
-        else:
-            g = self.gain
-
-        vnorm = self.v.view(self.out_dim, -1).norm(p=2, dim=1)
-        assert vnorm.shape == self.gain.shape == self.b.shape
-        w = self.v * (g / (vnorm + _SMALL)).view(1, self.out_dim, 1, 1)
-        return F.conv_transpose2d(x, w, self.b, stride=self.stride, padding=self.padding)
-
-    def extra_repr(self):
-        return 'in_dim={}, out_dim={}, kernel_size={}, stride={}, padding={}, init_scale={}, loggain={}'.format(self.in_dim, self.out_dim, self.kernel_size, self.stride, self.padding, self.init_scale, self.loggain)
-'''
 
 class IAFLayer(nn.Module):
     def __init__(self, hparam, downsample):
@@ -374,6 +314,87 @@ class IAFLayer(nn.Module):
         h = self.down_merge_conv2d(h)
         return input + 0.1 * h
 '''
+
+
+class SimpleNet(nn.Module):
+    def __init__(self, in_dim, out_dim, up_down=None):
+        super(SimpleNet, self).__init__()
+        hidden_size = 128
+        # image shape is 3 * 32 * 32
+        self.conv1 = wn(nn.Conv2d(in_channels=in_dim, out_channels=hidden_size, 
+                                  kernel_size=3, stride=1, padding=1))
+        self.conv2 = wn(nn.Conv2d(in_channels=hidden_size, out_channels=hidden_size, 
+                                  kernel_size=3, stride=1, padding=1))
+        self.conv3 = wn(nn.Conv2d(in_channels=hidden_size, out_channels=hidden_size, 
+                                  kernel_size=3, stride=1, padding=1))
+        self.conv4 = wn(nn.Conv2d(in_channels=hidden_size, out_channels=out_dim, 
+                                  kernel_size=3, stride=1, padding=1))
+        self.down  = wn(nn.Conv2d(in_channels=in_dim, out_channels=in_dim, 
+                                  kernel_size=4, stride=2, padding=1))
+        self.up = wn(nn.ConvTranspose2d(in_channels=in_dim, out_channels=in_dim, 
+                                        kernel_size=4, stride=2, padding=1))
+        self.act = nn.PReLU()
+        self.up_down = up_down
+
+    def forward(self, x, up_down=None):
+        if up_down == "up":
+            x = self.act(self.up(x))
+        elif up_down == "down":
+            x = self.act(self.down(x))
+        x = self.act(self.conv1(x))
+        x = self.act(self.conv2(x))
+        x = self.act(self.conv3(x))
+        x = self.act(self.conv4(x))
+
+        return x
+
+class Conv1x1Net(nn.Module):
+    def __init__(self, in_dim, out_dim, up_down=None):
+        super(Conv1x1Net, self).__init__()
+        hidden_size = 128
+        # image shape is 3 * 32 * 32
+        self.conv1 = wn(nn.Conv2d(in_channels=in_dim, out_channels=hidden_size, 
+                                  kernel_size=1, stride=1, padding=0))
+        self.conv2 = wn(nn.Conv2d(in_channels=hidden_size, out_channels=hidden_size, 
+                                  kernel_size=1, stride=1, padding=0))
+        self.conv3 = wn(nn.Conv2d(in_channels=hidden_size, out_channels=hidden_size, 
+                                  kernel_size=1, stride=1, padding=0))
+        self.conv4 = wn(nn.Conv2d(in_channels=hidden_size, out_channels=out_dim, 
+                                  kernel_size=1, stride=1, padding=0))
+        self.down  = wn(nn.Conv2d(in_channels=in_dim, out_channels=in_dim, 
+                                  kernel_size=4, stride=2, padding=1))
+        self.up = wn(nn.ConvTranspose2d(in_channels=in_dim, out_channels=in_dim, 
+                                        kernel_size=4, stride=2, padding=1))
+        self.act = nn.PReLU()
+        self.up_down = up_down
+        
+    def forward(self, x):
+        if self.up_down == "up":
+            x = self.act(self.up(x))
+        elif self.up_down == "down":
+            x = self.act(self.down(x))
+        x = self.act(self.conv1(x))
+        x = self.act(self.conv2(x))
+        x = self.act(self.conv3(x))
+        x = self.act(self.conv4(x))
+
+        return x
+
+# x with shape (C, H, W) lossless downsampled to (4*C, H/2, W/2)
+def lossless_downsample(input, factor=2):
+	#assert factor >= 1 and isinstance(factor, int)
+	if factor == 1:
+		return input
+	size = input.size()
+	B = size[0]
+	C = size[1]
+	H = size[2]
+	W = size[3]
+	assert H % factor == 0 and W % factor == 0, "{}".format((H, W))
+	x = input.view(B, C, H // factor, factor, W // factor, factor)
+	x = x.permute(0, 1, 3, 5, 2, 4).contiguous()
+	x = x.view(B, C * factor * factor, H // factor, W // factor)
+	return x
 
 
 # taken from https://github.com/jzbontar/pixelcnn-pytorch

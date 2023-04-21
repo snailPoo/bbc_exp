@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from utils.common import same_seed, load_model, load_data
 from config import *
 
-cf = Config_hilloc()# Config_bbans # Config_bitswap # Config_hilloc
+cf = Config_shvc()# Config_bbans # Config_bitswap # Config_hilloc # Config_shvc
 
 _INIT_ENABLED = False
 @contextmanager
