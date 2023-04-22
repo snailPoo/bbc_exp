@@ -935,120 +935,200 @@ class Convolutional_VAE(nn.Module):
 
         return outs
 
+
+
 import torch.nn.utils.weight_norm as wn
 
+class ChannelPriorUniScale(nn.Module):
+    def __init__(self, z1_cond, kernel_size, hidden_size=32, num_layers=1, dp_rate=0.2):
+        super().__init__()
+
+        if z1_cond:
+            self.z1_cond_network = nn.Sequential(
+                nn.ConvTranspose2d(32, 32, 4, stride=2, padding=1), 
+                nn.ReLU(), 
+                nn.Conv2d(32, 4, 5, stride=1, padding=2))
+        
+        self.prior_lstm = modules.ConvSeqEncoder(
+            input_ch=5 if z1_cond else 1, out_ch=3 * 5, 
+            kernel_size=kernel_size, embed_ch=hidden_size, 
+            num_layers=num_layers, dropout=dp_rate)
+
+        self.register_parameter('s', nn.Parameter(torch.tensor(6.)))
+        
+        self.z1_cond = z1_cond
+        self.dp_rate = dp_rate
+        self.cond_dropout = nn.Dropout2d(dp_rate)
+
+    def dropout_in(self, x):
+        prob = torch.rand(x.size(0), x.size(1))
+        x[prob < self.dp_rate] = 0
+        return x    
+
+    def get_likelihood(self, input):# 順向編碼，要反過來        
+        if self.z1_cond:
+            x, z1 = input # (B, 4C, H/2, W/2), (B, 32, H/4, W/4)
+            z1_embd = self.z1_cond_network(z1) # (B, 4, H/2, W/2)
+            z1_embd = z1_embd.unsqueeze(1).repeat(1, x.size(1), 1, 1, 1) # (B, 4C, 4, H/2, W/2)
+        else:
+            x = input
+        x = x.unsqueeze(2) # (B, 4C, 1, H/2, W/2)
+
+        init_zero_input = torch.zeros(x.size(0), 1, 1, x.size(-2), x.size(-1)).to(x.device) # (B, 1, 1, H/2, W/2)
+        x_dp = self.dropout_in(x.clone())[:, 0:-1, :] # (B, 4C-1, 1, H/2, W/2) last channel doesn't use
+        lstm_input = torch.cat([init_zero_input, x_dp], dim=1) # (B, 4C, 1, H/2, W/2)
+        if self.z1_cond:
+            lstm_input = torch.cat([lstm_input, z1_embd], dim=2) # (B, 4C, 5, H/2, W/2)
+
+        x_5d_params, _ = self.prior_lstm(lstm_input) # (B, 4C, 15, H/2, W/2)
+
+        log_p = torch.Tensor([0.] * x.size(0))
+        if self.z1_cond:
+            # encode x_i ~ p(x_i|x_1:i-1, z1), i = s, ..., 1
+            for i in range(int(self.s), -1, -1):
+                y = x[:, i, :, :, :]
+                param = x_5d_params[:, i, :, :, :]
+                log_p += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=1)
+        else:
+            # encode x_i ~ p(x_i|x_1:i-1), i = 12, ..., s+1
+            for i in range(11, int(self.s), -1):
+                y = x[:, i, :, :, :]
+                param = x_5d_params[:, i, :, :, :]
+                log_p += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=1)
+
+        return log_p
+
+    def get_sample(self, r=None):    
+        with torch.no_grad():
+            hidden = None
+
+            if self.z1_cond:
+                z1 = input # (B, 32, H/4, W/4)
+                z1_embd = self.z1_cond_network(z1) # (B, 4, H/2, W/2)
+                z1_embd = z1_embd.unsqueeze(1) # (B, 1, 4, H/2, W/2)
+
+                init_zero_input = torch.zeros(z1_embd.size(0), 1, 1, z1_embd.size(-2), z1_embd.size(-1)).to(z1_embd.device) # (B, 1, 1, H/2, W/2)
+                lstm_input = torch.cat([init_zero_input, z1_embd], dim=2).to(z1_embd.device) # (B, 1, 5, H/2, W/2)
+                len = int(self.s)
+            else:
+                x = input.unsqueeze(2) # (B, s, 1, H/2, W/2)
+                init_zero_input = torch.zeros(x.size(0), 1, 1, x.size(-2), x.size(-1)).to(x.device) # (B, 1, 1, H/2, W/2)
+                lstm_input = torch.cat([init_zero_input, x], dim=1) # (B, s+1, 1, H/2, W/2)
+                len = 12-int(self.s)
+            
+            x_out = []
+            for _ in range(len):
+                x_5d_param, hidden = self.prior_lstm(lstm_input, hidden)
+                x_sample = random.sample_from_discretized_mix_logistic(x_5d_param, 5)
+                x_out.append(x_sample)
+                lstm_input = torch.cat([lstm_input, x_sample], dim=1)
+            
+            x_sample = torch.cat(x_out, dim=1).squeeze(2)
+            return x_sample
+
+
+    def forward(self, input, reverse=False):    
+        if not reverse:
+            return self.get_likelihood(input)
+        else:
+            return self.get_sample(input) # z1
+
 class Simple_SHVC(nn.Module):
-	def __init__(self, hparam):
-		super(Simple_SHVC, self).__init__()
+    def __init__(self, hparam):
+        super(Simple_SHVC, self).__init__()
 
-		self.C, self.H, self.W = hparam.xdim
+        self.C, self.H, self.W = hparam.xdim
 
-		# self.z_dim = [(), (32, H >> 2, W >> 2), (24, H >> 3, W >> 3), (16, H >> 4, W >> 4), (8, H >> 5, W >> 5)]
-		self.z_dim = [12, 32, 24, 16, 8]
+        # self.z_dim = [(), (32, H >> 2, W >> 2), (24, H >> 3, W >> 3), (16, H >> 4, W >> 4), (8, H >> 5, W >> 5)]
+        self.z_dim = [12, 32, 24, 16, 8]
 
-		self.register_parameter('s', nn.Parameter(torch.tensor(6.)))
+        self.register_parameter('s', nn.Parameter(torch.tensor(6.)))
 
-		self.p_x_given_ARx_z1 = modules.Conv1x1Net(self.z_dim[0]-1 + self.z_dim[1], 3 * 5)
+        self.p_x_given_ARx_z1 = modules.Conv1x1Net(self.z_dim[0]-1 + self.z_dim[1], 3 * 5)
+        self.p_x_given_ARx    = ChannelPriorUniScale(z1_cond=False, kernel_size=5, hidden_size=32, num_layers=3, dp_rate=0)
+        self.p_x_given_ARx_z1 = ChannelPriorUniScale(z1_cond=True,  kernel_size=5, hidden_size=32, num_layers=3, dp_rate=0)
 
-		self.q_z1_given_x  = modules.Conv1x1Net(self.z_dim[0]-1, 2 * self.z_dim[1], "down")
-		self.q_z2_given_z1 = modules.Conv1x1Net(self.z_dim[1]  , 2 * self.z_dim[2], "down")
-		self.q_z3_given_z2 = modules.Conv1x1Net(self.z_dim[2]  , 2 * self.z_dim[3], "down")
+        self.q_z1_given_x  = modules.Conv1x1Net(self.z_dim[0]-1, 2 * self.z_dim[1], "down")
+        self.q_z2_given_z1 = modules.Conv1x1Net(self.z_dim[1]  , 2 * self.z_dim[2], "down")
+        self.q_z3_given_z2 = modules.Conv1x1Net(self.z_dim[2]  , 2 * self.z_dim[3], "down")
 
-		self.p_z1_given_z2 = modules.Conv1x1Net(self.z_dim[2], 2 * self.z_dim[1], "up")
-		self.p_z2_given_z3 = modules.Conv1x1Net(self.z_dim[3], 2 * self.z_dim[2], "up")
-		self.p_z3 = modules.Conv1x1Net(self.z_dim[3]-1, 2)
+        self.p_z1_given_z2 = modules.Conv1x1Net(self.z_dim[2], 2 * self.z_dim[1], "up")
+        self.p_z2_given_z3 = modules.Conv1x1Net(self.z_dim[3], 2 * self.z_dim[2], "up")
+        self.p_z3 = modules.Conv1x1Net(self.z_dim[3]-1, 2)
 
-		self.z_up = wn(nn.ConvTranspose2d(in_channels=self.z_dim[1], out_channels=self.z_dim[1], 
-									      kernel_size=4, stride=2, padding=1))
-		self.lamb = 0.1
-		self.nat2bit = np.log2(np.e)
-		self.num_pixels = np.prod(hparam.xdim)
-		self.logger = None
-		self.best_elbo = np.inf
-		# self.c_prior = ChannelPriorMultiScale(batch_size,3,32,32,L,mog=False,dp_rate=0,num_layers=3,hidden_size=32)
-		
+        self.z_up = wn(nn.ConvTranspose2d(in_channels=self.z_dim[1], out_channels=self.z_dim[1], 
+                                          kernel_size=4, stride=2, padding=1))
+        self.lamb = 0.1
+        self.nat2bit = np.log2(np.e)
+        self.num_pixels = np.prod(hparam.xdim)
+        self.logger = None
+        self.best_elbo = np.inf
+        # self.c_prior = ChannelPriorMultiScale(batch_size,3,32,32,L,mog=False,dp_rate=0,num_layers=3,hidden_size=32)
+        
 
-	def loss(self, x, tag):
-		batch_size = x.shape[0]
-		x = modules.lossless_downsample(x)
-		init_save = log_p = log_q = torch.Tensor([0.] * batch_size).to(x.device)
-		
-		# encode x_i ~ p(x_i|x_1:i-1), i = 12, ..., s+1
-		for i in range(1, self.z_dim[0]-int(self.s)+1):
-			y = x[:, -i, :, :].unsqueeze(1)
-			pad = torch.zeros((batch_size, self.z_dim[1] + (i - 1), self.H >> 1, self.W >> 1)).to(x.device)
-			h = torch.cat((x[:, :-i, :, :], pad), dim=1)
-			# mu_xi, logsd_xi = torch.split(self.p_x_given_ARx_z1(h), 5, dim=1)
-			# p_xi = Logistic_Mixture(mu_xi, logsd_xi)
-			# init_save += p_xi.prob(y)
-			channel_save = torch.sum(random.discretized_mix_logistic_logp(y, self.p_x_given_ARx_z1(h)), dim=1)
-			init_save += channel_save
-			log_p += channel_save
+    def loss(self, x, tag):
+        batch_size = x.shape[0]
+        x = modules.lossless_downsample(x)
+        init_save = log_p = log_q = torch.Tensor([0.] * batch_size).to(x.device)
+        
+        # encode x_i ~ p(x_i|x_1:i-1), i = 12, ..., s+1
+        # for i in range(1, self.z_dim[0]-int(self.s)+1):
+        #     y = x[:, -i, :, :].unsqueeze(1)
+        #     pad = torch.zeros((batch_size, self.z_dim[1] + (i - 1), self.H >> 1, self.W >> 1)).to(x.device)
+        #     h = torch.cat((x[:, :-i, :, :], pad), dim=1)
+        #     channel_save = torch.sum(random.discretized_mix_logistic_logp(y, self.p_x_given_ARx_z1(h)), dim=1)
+        #     init_save += channel_save
+        #     log_p += channel_save
+        init_save = self.p_x_given_ARx(x)
+        log_p += init_save
 
-		# decode z^1 ~ p(z^1|x_1:s)
-		pad = torch.zeros((batch_size, self.z_dim[0]-int(self.s)-1, self.H >> 1, self.W >> 1)).to(x.device)
-		h = torch.cat((x[:, :-int(self.s), :, :], pad), dim=1)
-		mu_z, logsd_z = torch.split(self.q_z1_given_x(h), self.z_dim[1], dim=1)
-		# q_z = Logistic(mu_z, logsd_z)
-		# z1 = q_z.sample
-		# init_cost = q_z.prob(z1)
-		z1 = random.sample_from_logistic(mu_z, logsd_z, mu_z.shape, device=mu_z.device)
-		init_cost = torch.sum(random.logistic_logp(mu_z, logsd_z, z1), dim=(1,2))
-		log_q += init_cost
+        # decode z^1 ~ p(z^1|x_1:s)
+        pad = torch.zeros((batch_size, self.z_dim[0]-int(self.s)-1, self.H >> 1, self.W >> 1)).to(x.device)
+        h = torch.cat((x[:, :-int(self.s), :, :], pad), dim=1)
+        mu_z, logsd_z = torch.split(self.q_z1_given_x(h), self.z_dim[1], dim=1)
+        z1 = random.sample_from_logistic(mu_z, logsd_z, mu_z.shape, device=mu_z.device)
+        init_cost = torch.sum(random.logistic_logp(mu_z, logsd_z, z1), dim=(1,2))
+        log_q += init_cost
 
-		# encode x_i ~ p(x_i|x_1:i-1, z1), i = s, ..., 1
-		up_z1 = self.z_up(z1)
-		for i in range(int(self.s), 0, -1):
-			y = x[:, i, :, :].unsqueeze(1)
-			pad = torch.zeros((batch_size, self.z_dim[0] - i - 1, self.H >> 1, self.W >> 1)).to(x.device)
-			h = torch.cat((x[:, :i, :, :], pad, up_z1), dim=1)
-			# mu_xi, logsd_xi = torch.split(self.p_x_given_ARx_z1(h), 5, dim=1)
-			# p_xi = Logistic_Mixture(mu_xi, logsd_xi)
-			# log_p += p_xi.prob(y)
-			log_p += torch.sum(random.discretized_mix_logistic_logp(y, self.p_x_given_ARx_z1(h)), dim=1)
-		
-		# decode z^2 ~ q(z^2|z^1)
-		mu_z, logsd_z = torch.split(self.q_z2_given_z1(z1), self.z_dim[2], dim=1)
-		# q_z = Logistic(mu_z, logsd_z)
-		# z2 = q_z.sample
-		# log_q += q_z.prob(z2)
-		z2 = random.sample_from_logistic(mu_z, logsd_z, mu_z.shape, device=mu_z.device)
-		log_q += torch.sum(random.logistic_logp(mu_z, logsd_z, z2), dim=(1,2))
+        # encode x_i ~ p(x_i|x_1:i-1, z1), i = s, ..., 1
+        # up_z1 = self.z_up(z1)
+        # for i in range(int(self.s), 0, -1):
+        #     y = x[:, i, :, :].unsqueeze(1)
+        #     pad = torch.zeros((batch_size, self.z_dim[0] - i - 1, self.H >> 1, self.W >> 1)).to(x.device)
+        #     h = torch.cat((x[:, :i, :, :], pad, up_z1), dim=1)
+        #     log_p += torch.sum(random.discretized_mix_logistic_logp(y, self.p_x_given_ARx_z1(h)), dim=1)
+        log_p += self.p_x_given_ARx_z1((x, z1))
 
-		# encode z^1 ~ p(z^1|z^2)
-		mu_z, logsd_z = torch.split(self.p_z1_given_z2(z2), self.z_dim[1], dim=1)
-		# p_z = Logistic(mu_z, logsd_z)
-		# log_p += p_z.prob(z1)
-		log_p += torch.sum(random.logistic_logp(mu_z, logsd_z, z1), dim=(1,2))
+        # decode z^2 ~ q(z^2|z^1)
+        mu_z, logsd_z = torch.split(self.q_z2_given_z1(z1), self.z_dim[2], dim=1)
+        z2 = random.sample_from_logistic(mu_z, logsd_z, mu_z.shape, device=mu_z.device)
+        log_q += torch.sum(random.logistic_logp(mu_z, logsd_z, z2), dim=(1,2))
+
+        # encode z^1 ~ p(z^1|z^2)
+        mu_z, logsd_z = torch.split(self.p_z1_given_z2(z2), self.z_dim[1], dim=1)
+        log_p += torch.sum(random.logistic_logp(mu_z, logsd_z, z1), dim=(1,2))
 
 
-		# decode z^3 ~ q(z^3|z^2)
-		mu_z, logsd_z = torch.split(self.q_z3_given_z2(z2), self.z_dim[3], dim=1)
-		# q_z = Logistic(mu_z, logsd_z)
-		# z3 = q_z.sample
-		# log_q += q_z.prob(z3)
-		z3 = random.sample_from_logistic(mu_z, logsd_z, mu_z.shape, device=mu_z.device)
-		log_q += torch.sum(random.logistic_logp(mu_z, logsd_z, z3), dim=(1,2))
+        # decode z^3 ~ q(z^3|z^2)
+        mu_z, logsd_z = torch.split(self.q_z3_given_z2(z2), self.z_dim[3], dim=1)
+        z3 = random.sample_from_logistic(mu_z, logsd_z, mu_z.shape, device=mu_z.device)
+        log_q += torch.sum(random.logistic_logp(mu_z, logsd_z, z3), dim=(1,2))
 
-		# encode z^2 ~ p(z^2|z^3)
-		mu_z, logsd_z = torch.split(self.p_z2_given_z3(z3), self.z_dim[2], dim=1)
-		# p_z = Logistic(mu_z, logsd_z)
-		# log_p += p_z.prob(z2)
-		log_p += torch.sum(random.logistic_logp(mu_z, logsd_z, z2), dim=(1,2))
+        # encode z^2 ~ p(z^2|z^3)
+        mu_z, logsd_z = torch.split(self.p_z2_given_z3(z3), self.z_dim[2], dim=1)
+        log_p += torch.sum(random.logistic_logp(mu_z, logsd_z, z2), dim=(1,2))
 
-		# encode z^3
-		for i in range(1, self.z_dim[3]):
-			y = z3[:, -i, :, :]
-			if i > 1:
-				pad = torch.zeros((batch_size, i - 1, self.H >> 4, self.W >> 4)).to(x.device)
-				h = torch.cat((z3[:, :-i, :, :], pad), dim=1)
-			else:
-				h = z3[:, :-i, :, :]
-			mu_z, logsd_z = torch.split(self.p_z3(h), 1, dim=1)
-			# p_z3 = Logistic(mu_z, logsd_z)
-			# log_p += p_z3.prob(y)
-			log_p += torch.sum(random.logistic_logp(mu_z, logsd_z, y), dim=(1,2))
+        # encode z^3
+        for i in range(1, self.z_dim[3]):
+            y = z3[:, -i, :, :]
+            if i > 1:
+                pad = torch.zeros((batch_size, i - 1, self.H >> 4, self.W >> 4)).to(x.device)
+                h = torch.cat((z3[:, :-i, :, :], pad), dim=1)
+            else:
+                h = z3[:, :-i, :, :]
+            mu_z, logsd_z = torch.split(self.p_z3(h), 1, dim=1)
+            log_p += torch.sum(random.logistic_logp(mu_z, logsd_z, y), dim=(1,2))
 
-		loss = torch.mean(log_q - log_p) * self.nat2bit / self.num_pixels + self.lamb * torch.mean(torch.max(torch.tensor(0.), - init_cost + init_save))
+        loss = torch.mean(log_q - log_p) * self.nat2bit / self.num_pixels + self.lamb * torch.mean(torch.max(torch.tensor(0.), - init_cost + init_save))
 
-		return loss, None
+        return loss, None

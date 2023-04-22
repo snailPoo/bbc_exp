@@ -1,14 +1,12 @@
 from contextlib import contextmanager
 
-from torch.nn import Module, ModuleList, Parameter, Sequential, Dropout, ELU
+from torch.nn import Module, Parameter, Sequential, Dropout, ELU
 from torch.nn import init
-import os
 import torch
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.utils.weight_norm as wn
-import torch.distributions as D
 from utils.distributions import DiagonalGaussian
 
 _WN_INIT_STDV = 0.05
@@ -396,6 +394,46 @@ def lossless_downsample(input, factor=2):
 	x = x.view(B, C * factor * factor, H // factor, W // factor)
 	return x
 
+from module_shvc import Conv2dLSTM
+
+class ConvSeqEncoder(nn.Module):
+	def __init__(self, input_ch, out_ch, embed_ch, kernel_size=5, dilation=1, num_layers=1, bidirectional=False, dropout=0.0):
+		super().__init__()
+		self.lstm = Conv2dLSTM(in_channels=embed_ch,  # Corresponds to input size
+								   out_channels=embed_ch,  # Corresponds to hidden size
+								   kernel_size=kernel_size,  # Int or List[int]
+								   num_layers=num_layers,
+								   bidirectional=bidirectional,
+								   dilation=dilation, stride=1, dropout=0.0,
+								   batch_first=True)
+
+		
+		self.conv_embed = nn.Conv2d(input_ch, embed_ch, kernel_size, stride=1, padding=(1 if kernel_size==3 else 2))
+		self.conv_out1 = nn.Conv2d(embed_ch * (2 if bidirectional else 1), out_ch, 3, stride=1, padding=1 )
+		self.embed_ch = embed_ch
+		self.out_ch = out_ch
+		self.dropout = dropout
+		self.conv_dropout = nn.Dropout2d(dropout)
+
+	def td_conv(self,x,conv_fn,out_ch):
+		x = x.contiguous()
+		batch_size = x.size(0)
+		time_steps = x.size(1)
+		x = x.view(batch_size*time_steps,x.size(2),x.size(3),x.size(4))
+		x = conv_fn(x)
+		if self.dropout > 0:
+			x = self.conv_dropout(x)	
+		x = x.view(batch_size,time_steps,out_ch,x.size(2),x.size(3))
+		return x
+		
+	def forward(self, x, hidden = None):
+		x2 = self.td_conv(x,self.conv_embed,self.embed_ch)
+		
+		outputs, hidden = self.lstm(x2, hidden)
+			
+		output = self.td_conv(outputs,self.conv_out1,self.out_ch)
+		return output, hidden
+
 
 # taken from https://github.com/jzbontar/pixelcnn-pytorch
 class MaskedConv2d(nn.Conv2d):
@@ -436,74 +474,7 @@ class ARMultiConv2d(nn.Module):
             x = self.nl(x)
 
         return [conv_layer(x) for conv_layer in self.out_convs]
-    
-# def get_linear_ar_mask(n_in, n_out, zerodiagonal=False):
-#     assert n_in % n_out == 0 or n_out % n_in == 0, "%d - %d" % (n_in, n_out)
 
-#     mask = np.ones([n_in, n_out], dtype=np.float32)
-#     if n_out >= n_in:
-#         k = n_out // n_in
-#         for i in range(n_in):
-#             mask[i + 1:, i * k:(i + 1) * k] = 0
-#             if zerodiagonal:
-#                 mask[i:i + 1, i * k:(i + 1) * k] = 0
-#     else:
-#         k = n_in // n_out
-#         for i in range(n_out):
-#             mask[(i + 1) * k:, i:i + 1] = 0
-#             if zerodiagonal:
-#                 mask[i * k:(i + 1) * k:, i:i + 1] = 0
-#     return mask
-
-# def get_conv_ar_mask(h, w, n_in, n_out, zerodiagonal=False):
-#     l = (h - 1) // 2
-#     m = (w - 1) // 2
-#     mask = np.ones([h, w, n_in, n_out], dtype=np.float32)
-#     mask[:l, :, :, :] = 0
-#     mask[l, :m, :, :] = 0
-#     mask[l, m, :, :] = get_linear_ar_mask(n_in, n_out, zerodiagonal)
-#     return torch.tensor(mask).permute((3,2,0,1))
-
-# class ArMulticonv2d(Module):
-#     def __init__(self, n_in, n_h, n_out):
-#         super(ArMulticonv2d, self).__init__()
-#         self.conv_layers = ModuleList()
-#         self.out_layers = ModuleList()
-
-#         kernel_size = 3
-#         stride = 1
-#         padding = 1
-
-#         zerodiagonal = False
-#         for i, size in enumerate(n_h):
-#             mask = get_conv_ar_mask(kernel_size, kernel_size, 
-#                                     n_in, size, zerodiagonal)
-#             conv_layer = WnConv2d(in_dim=n_in if i == 0 else n_h[i-1], 
-#                                   out_dim=size, kernel_size=kernel_size, 
-#                                   stride=stride, padding=padding, mask=mask)
-#             self.conv_layers.append(conv_layer)
-
-#         zerodiagonal = True
-#         mask = torch.tensor(get_conv_ar_mask(kernel_size, kernel_size, 
-#                                                 n_h[-1], size, zerodiagonal))
-#         for i, size in enumerate(n_out):
-#             out_layer = WnConv2d(in_dim=n_h[-1], out_dim=size, 
-#                                  kernel_size=kernel_size, stride=stride, 
-#                                  padding=padding, mask=mask)
-#             self.out_layers.append(out_layer)
-        
-#         self.nl = ELU()
-
-#     def forward(self, x, context):
-#         for i, conv_layer in enumerate(self.conv_layers):
-#             x = conv_layer(x)
-#             if i == 0:
-#                 x += context
-#             x = self.nl(x)
-#         out = []
-#         for i, out_layer in enumerate(self.out_layers):
-#             out.append(out_layer(x))
-#         return out
     
 # numerically stable version of the "softplus" function
 def softplus(x):
