@@ -392,6 +392,8 @@ def lossless_downsample(input, factor=2):
 	x = input.view(B, C, H // factor, factor, W // factor, factor)
 	x = x.permute(0, 1, 3, 5, 2, 4).contiguous()
 	x = x.view(B, C * factor * factor, H // factor, W // factor)
+	permute = (0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11)
+	x = x[:, permute]
 	return x
 
 from utils.torch.module_shvc import Conv2dLSTM

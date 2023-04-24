@@ -1063,7 +1063,6 @@ class Simple_SHVC(nn.Module):
         self.num_pixels = np.prod(hparam.xdim)
         self.logger = None
         self.best_elbo = np.inf
-        # self.c_prior = ChannelPriorMultiScale(batch_size,3,32,32,L,mog=False,dp_rate=0,num_layers=3,hidden_size=32)
         
 
     def loss(self, x, tag):
@@ -1173,10 +1172,7 @@ class Simple_SHVC(nn.Module):
             # print(f'encode z3 layer {self.z_dim[3]-i}, log_p add: {tmp}')
         log_p += torch.sum(random.logistic_logp(torch.zeros(1, device=x.device), torch.ones(1, device=x.device), z3[:, 0, :, :]), dim=(1,2))
 
-        # print(f'{torch.mean(log_q - log_p)=}')
-        # print(f'{torch.mean(log_q - log_p) * self.nat2bit=}')
-        # print(f'{torch.mean(log_q - log_p) * self.nat2bit / self.num_pixels=}')
-        # print(f'{torch.mean(torch.max(torch.tensor(0.), - init_cost + init_save))=}')
-        loss = torch.mean(log_q - log_p) * self.nat2bit / self.num_pixels + self.lamb * torch.mean(torch.max(torch.tensor(0.), - init_cost + init_save))
+        penalty = self.lamb * torch.mean(torch.max(torch.tensor(0.), - init_cost + init_save))
+        loss = torch.mean(log_q - log_p) * self.nat2bit / self.num_pixels
 
         return loss, None
