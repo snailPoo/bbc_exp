@@ -394,7 +394,7 @@ def lossless_downsample(input, factor=2):
 	x = x.view(B, C * factor * factor, H // factor, W // factor)
 	return x
 
-from module_shvc import Conv2dLSTM
+from utils.torch.module_shvc import Conv2dLSTM
 
 class ConvSeqEncoder(nn.Module):
 	def __init__(self, input_ch, out_ch, embed_ch, kernel_size=5, dilation=1, num_layers=1, bidirectional=False, dropout=0.0):

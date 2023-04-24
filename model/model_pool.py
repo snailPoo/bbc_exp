@@ -953,8 +953,6 @@ class ChannelPriorUniScale(nn.Module):
             input_ch=5 if z1_cond else 1, out_ch=3 * 5, 
             kernel_size=kernel_size, embed_ch=hidden_size, 
             num_layers=num_layers, dropout=dp_rate)
-
-        self.register_parameter('s', nn.Parameter(torch.tensor(6.)))
         
         self.z1_cond = z1_cond
         self.dp_rate = dp_rate
@@ -965,7 +963,7 @@ class ChannelPriorUniScale(nn.Module):
         x[prob < self.dp_rate] = 0
         return x    
 
-    def get_likelihood(self, input):# 順向編碼，要反過來        
+    def get_likelihood(self, input, s):# 順向編碼，要反過來        
         if self.z1_cond:
             x, z1 = input # (B, 4C, H/2, W/2), (B, 32, H/4, W/4)
             z1_embd = self.z1_cond_network(z1) # (B, 4, H/2, W/2)
@@ -982,16 +980,16 @@ class ChannelPriorUniScale(nn.Module):
 
         x_5d_params, _ = self.prior_lstm(lstm_input) # (B, 4C, 15, H/2, W/2)
 
-        log_p = torch.Tensor([0.] * x.size(0))
+        log_p = torch.Tensor([0.] * x.size(0)).to(lstm_input.device)
         if self.z1_cond:
             # encode x_i ~ p(x_i|x_1:i-1, z1), i = s, ..., 1
-            for i in range(int(self.s), -1, -1):
+            for i in range(int(s), -1, -1):
                 y = x[:, i, :, :, :]
                 param = x_5d_params[:, i, :, :, :]
                 log_p += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=1)
         else:
             # encode x_i ~ p(x_i|x_1:i-1), i = 12, ..., s+1
-            for i in range(11, int(self.s), -1):
+            for i in range(11, int(s), -1):
                 y = x[:, i, :, :, :]
                 param = x_5d_params[:, i, :, :, :]
                 log_p += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=1)
@@ -1027,9 +1025,9 @@ class ChannelPriorUniScale(nn.Module):
             return x_sample
 
 
-    def forward(self, input, reverse=False):    
+    def forward(self, input, s, reverse=False):    
         if not reverse:
-            return self.get_likelihood(input)
+            return self.get_likelihood(input, s)
         else:
             return self.get_sample(input) # z1
 
@@ -1042,9 +1040,9 @@ class Simple_SHVC(nn.Module):
         # self.z_dim = [(), (32, H >> 2, W >> 2), (24, H >> 3, W >> 3), (16, H >> 4, W >> 4), (8, H >> 5, W >> 5)]
         self.z_dim = [12, 32, 24, 16, 8]
 
-        self.register_parameter('s', nn.Parameter(torch.tensor(6.)))
+        self.register_parameter('s', nn.Parameter(torch.tensor(9.)))
 
-        self.p_x_given_ARx_z1 = modules.Conv1x1Net(self.z_dim[0]-1 + self.z_dim[1], 3 * 5)
+        # self.p_x_given_ARx_z1 = modules.Conv1x1Net(self.z_dim[0]-1 + self.z_dim[1], 3 * 5)
         self.p_x_given_ARx    = ChannelPriorUniScale(z1_cond=False, kernel_size=5, hidden_size=32, num_layers=3, dp_rate=0)
         self.p_x_given_ARx_z1 = ChannelPriorUniScale(z1_cond=True,  kernel_size=5, hidden_size=32, num_layers=3, dp_rate=0)
 
@@ -1055,10 +1053,12 @@ class Simple_SHVC(nn.Module):
         self.p_z1_given_z2 = modules.Conv1x1Net(self.z_dim[2], 2 * self.z_dim[1], "up")
         self.p_z2_given_z3 = modules.Conv1x1Net(self.z_dim[3], 2 * self.z_dim[2], "up")
         self.p_z3 = modules.Conv1x1Net(self.z_dim[3]-1, 2)
+        # self.p_z3 = ChannelPriorUniScale(z1_cond=False, kernel_size=3, hidden_size=32, num_layers=3, dp_rate=0)
 
         self.z_up = wn(nn.ConvTranspose2d(in_channels=self.z_dim[1], out_channels=self.z_dim[1], 
                                           kernel_size=4, stride=2, padding=1))
-        self.lamb = 0.1
+        self.sigmoid = nn.Sigmoid()
+        self.lamb = 0.001
         self.nat2bit = np.log2(np.e)
         self.num_pixels = np.prod(hparam.xdim)
         self.logger = None
@@ -1068,10 +1068,15 @@ class Simple_SHVC(nn.Module):
 
     def loss(self, x, tag):
         batch_size = x.shape[0]
+        init_save = torch.Tensor([0.] * batch_size).to(x.device)
+        log_p = torch.Tensor([0.] * batch_size).to(x.device)
+        log_q = torch.Tensor([0.] * batch_size).to(x.device)
+
         x = modules.lossless_downsample(x)
-        init_save = log_p = log_q = torch.Tensor([0.] * batch_size).to(x.device)
-        
+
+        # ----------------------------------------------
         # encode x_i ~ p(x_i|x_1:i-1), i = 12, ..., s+1
+        # ----------------------------------------------
         # for i in range(1, self.z_dim[0]-int(self.s)+1):
         #     y = x[:, -i, :, :].unsqueeze(1)
         #     pad = torch.zeros((batch_size, self.z_dim[1] + (i - 1), self.H >> 1, self.W >> 1)).to(x.device)
@@ -1079,56 +1084,99 @@ class Simple_SHVC(nn.Module):
         #     channel_save = torch.sum(random.discretized_mix_logistic_logp(y, self.p_x_given_ARx_z1(h)), dim=1)
         #     init_save += channel_save
         #     log_p += channel_save
-        init_save = self.p_x_given_ARx(x)
+        init_save = self.p_x_given_ARx(x, self.s)
         log_p += init_save
+        # print(f'encode x_s+1 ~ x_12, init_save: {log_p}')
 
+
+        # --------------------------
         # decode z^1 ~ p(z^1|x_1:s)
+        # --------------------------
         pad = torch.zeros((batch_size, self.z_dim[0]-int(self.s)-1, self.H >> 1, self.W >> 1)).to(x.device)
-        h = torch.cat((x[:, :-int(self.s), :, :], pad), dim=1)
-        mu_z, logsd_z = torch.split(self.q_z1_given_x(h), self.z_dim[1], dim=1)
-        z1 = random.sample_from_logistic(mu_z, logsd_z, mu_z.shape, device=mu_z.device)
-        init_cost = torch.sum(random.logistic_logp(mu_z, logsd_z, z1), dim=(1,2))
+        h = torch.cat((x[:, :int(self.s), :, :], pad), dim=1)
+        mu, logsd = torch.split(self.q_z1_given_x(h), self.z_dim[1], dim=1)
+        scale = 0.1 + 0.9 * self.sigmoid(torch.exp(logsd) + 2.) # clamp the output between [0.1, 1.0] for stability
+        z1 = random.sample_from_logistic(mu, scale, mu.shape, device=mu.device)
+        init_cost = torch.sum(random.logistic_logp(mu, scale, z1), dim=(1,2))
         log_q += init_cost
+        # print(f'decode z1, init_cost: {log_q}')
 
+        # -----------------------------------------------
         # encode x_i ~ p(x_i|x_1:i-1, z1), i = s, ..., 1
+        # -----------------------------------------------
         # up_z1 = self.z_up(z1)
         # for i in range(int(self.s), 0, -1):
         #     y = x[:, i, :, :].unsqueeze(1)
         #     pad = torch.zeros((batch_size, self.z_dim[0] - i - 1, self.H >> 1, self.W >> 1)).to(x.device)
         #     h = torch.cat((x[:, :i, :, :], pad, up_z1), dim=1)
         #     log_p += torch.sum(random.discretized_mix_logistic_logp(y, self.p_x_given_ARx_z1(h)), dim=1)
-        log_p += self.p_x_given_ARx_z1((x, z1))
+        tmp = self.p_x_given_ARx_z1((x, z1), self.s)
+        log_p += tmp
+        # print(f'encode x_1 ~ x_s, log_p add: {tmp}')
 
+        # ------------------------
         # decode z^2 ~ q(z^2|z^1)
-        mu_z, logsd_z = torch.split(self.q_z2_given_z1(z1), self.z_dim[2], dim=1)
-        z2 = random.sample_from_logistic(mu_z, logsd_z, mu_z.shape, device=mu_z.device)
-        log_q += torch.sum(random.logistic_logp(mu_z, logsd_z, z2), dim=(1,2))
+        # ------------------------
+        mu, logsd = torch.split(self.q_z2_given_z1(z1), self.z_dim[2], dim=1)
+        scale = 0.1 + 0.9 * self.sigmoid(torch.exp(logsd) + 2.)
+        z2 = random.sample_from_logistic(mu, scale, mu.shape, device=mu.device)
+        tmp = torch.sum(random.logistic_logp(mu, scale, z2), dim=(1,2))
+        log_q += tmp
+        # print(f'decode z2, log_q add: {tmp}')
 
+        
+        # ------------------------
         # encode z^1 ~ p(z^1|z^2)
-        mu_z, logsd_z = torch.split(self.p_z1_given_z2(z2), self.z_dim[1], dim=1)
-        log_p += torch.sum(random.logistic_logp(mu_z, logsd_z, z1), dim=(1,2))
+        # ------------------------
+        mu, logsd = torch.split(self.p_z1_given_z2(z2), self.z_dim[1], dim=1)
+        scale = 0.1 + 0.9 * self.sigmoid(torch.exp(logsd) + 2.)
+        tmp = torch.sum(random.logistic_logp(mu, scale, z1), dim=(1,2))
+        log_p += tmp
+        # print(f'encode z_1, log_p add: {tmp}')
 
 
+        # -------------------------------
         # decode z^3 ~ q(z^3|z^2)
-        mu_z, logsd_z = torch.split(self.q_z3_given_z2(z2), self.z_dim[3], dim=1)
-        z3 = random.sample_from_logistic(mu_z, logsd_z, mu_z.shape, device=mu_z.device)
-        log_q += torch.sum(random.logistic_logp(mu_z, logsd_z, z3), dim=(1,2))
+        # -------------------------------
+        mu, logsd = torch.split(self.q_z3_given_z2(z2), self.z_dim[3], dim=1)
+        scale = 0.1 + 0.9 * self.sigmoid(torch.exp(logsd) + 2.)
+        z3 = random.sample_from_logistic(mu, scale, mu.shape, device=mu.device)
+        tmp = torch.sum(random.logistic_logp(mu, scale, z3), dim=(1,2))
+        log_q += tmp
+        # print(f'decode z3, log_q add: {tmp}')
 
+        
+        # ------------------------
         # encode z^2 ~ p(z^2|z^3)
-        mu_z, logsd_z = torch.split(self.p_z2_given_z3(z3), self.z_dim[2], dim=1)
-        log_p += torch.sum(random.logistic_logp(mu_z, logsd_z, z2), dim=(1,2))
+        # ------------------------
+        mu, logsd = torch.split(self.p_z2_given_z3(z3), self.z_dim[2], dim=1)
+        scale = 0.1 + 0.9 * self.sigmoid(torch.exp(logsd) + 2.)
+        tmp = torch.sum(random.logistic_logp(mu, scale, z2), dim=(1,2))
+        log_p += tmp
+        # print(f'encode z2, log_p add: {tmp}')
 
+
+        # -----------
         # encode z^3
-        for i in range(1, self.z_dim[3]):
-            y = z3[:, -i, :, :]
-            if i > 1:
-                pad = torch.zeros((batch_size, i - 1, self.H >> 4, self.W >> 4)).to(x.device)
-                h = torch.cat((z3[:, :-i, :, :], pad), dim=1)
+        # -----------
+        for i in range(self.z_dim[3] - 1, 0, -1):
+            y = z3[:, i, :, :]
+            if i < self.z_dim[3] - 1:
+                pad = torch.zeros((batch_size, self.z_dim[3] - i - 1, self.H >> 4, self.W >> 4)).to(x.device)
+                h = torch.cat((z3[:, :i, :, :], pad), dim=1)
             else:
-                h = z3[:, :-i, :, :]
-            mu_z, logsd_z = torch.split(self.p_z3(h), 1, dim=1)
-            log_p += torch.sum(random.logistic_logp(mu_z, logsd_z, y), dim=(1,2))
+                h = z3[:, :i, :, :]
+            mu, logsd = torch.split(self.p_z3(h), 1, dim=1)
+            scale = 0.1 + 0.9 * self.sigmoid(torch.exp(logsd) + 2.)
+            tmp = torch.sum(random.logistic_logp(mu, scale, y), dim=(1,2))
+            log_p += tmp
+            # print(f'encode z3 layer {self.z_dim[3]-i}, log_p add: {tmp}')
+        log_p += torch.sum(random.logistic_logp(torch.zeros(1, device=x.device), torch.ones(1, device=x.device), z3[:, 0, :, :]), dim=(1,2))
 
+        # print(f'{torch.mean(log_q - log_p)=}')
+        # print(f'{torch.mean(log_q - log_p) * self.nat2bit=}')
+        # print(f'{torch.mean(log_q - log_p) * self.nat2bit / self.num_pixels=}')
+        # print(f'{torch.mean(torch.max(torch.tensor(0.), - init_cost + init_save))=}')
         loss = torch.mean(log_q - log_p) * self.nat2bit / self.num_pixels + self.lamb * torch.mean(torch.max(torch.tensor(0.), - init_cost + init_save))
 
         return loss, None

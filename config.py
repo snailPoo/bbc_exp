@@ -159,7 +159,7 @@ class Config_shvc(object):
         self.epochs = 1000
         self.lr=5e-4
         self.decay=0.9961
-        self.batch_size=64
+        self.batch_size=128
 
         self.model_name = "shvc"
         self.bbc_scheme = 'bitswap'
