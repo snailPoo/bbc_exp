@@ -21,9 +21,8 @@ def sample_from_logistic(mu, scale, shape, device, bound=1e-5):
 # function to calculate the log-probability of x under a Logistic(mu, scale) distribution
 def logistic_logp(mu, scale, x):
     _y = -(x - mu) / scale
-    _logp = -_y - torch.log(scale) - 2 * modules.softplus(-_y)
-    logp = _logp.flatten(2)
-    return logp
+    logp = -_y - torch.log(scale) - 2 * modules.softplus(-_y)
+    return logp # (B, C, H, W)
 
 # function to calculate the log-probability of x under a discretized Logistic(mu, scale) distribution
 # heavily based on discretized_mix_logistic_loss() in https://github.com/openai/pixel-cnn
@@ -59,8 +58,7 @@ def discretized_logistic_logp(mu, scale, x):
     cond2 = torch.where(x_rescaled > .999, log_one_minus_cdf_min, cond1)
     logps = torch.where(x_rescaled < -.999, log_cdf_plus, cond2)
 
-    logp = logps.flatten(1)
-    return logp
+    return logps
 
 
 def log_prob_from_logits(x):
@@ -123,10 +121,9 @@ def discretized_mix_logistic_logp(x, l):
                                                     torch.log(torch.clamp(cdf_delta, min=1e-12, max=None)), 
                                                     log_pdf_mid - np.log(127.5))))
     
-    log_probs = log_probs + log_prob_from_logits(logit_probs)
+    log_probs = log_probs + log_prob_from_logits(logit_probs) # (B, H, W, C, nr_mix)
     
-    # return -torch.sum(log_sum_exp(log_probs),dim=tuple(range(1,len(xs))))
-    return log_sum_exp(log_probs).flatten(1)
+    return log_sum_exp(log_probs) # (B, H, W, C)
 
 
 # def sample_from_discretized_mix_logistic(l, nr_mix):

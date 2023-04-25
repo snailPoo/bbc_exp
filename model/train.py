@@ -186,7 +186,8 @@ if __name__ == '__main__':
     count_num_params(model)
 
     # data-dependent initialization
-    # warmup(model, train_loader, 25)
+    if cf.warmup:
+        warmup(model, train_loader, 25)
 
     # initial test loss
     eval(0, test_loader, model)

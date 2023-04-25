@@ -5,17 +5,18 @@ from utils.discretization import *
 
 class Config_bbans(object):
     def __init__(self):
-        self.seed=100   # seed for dataset generation
-        self.log_interval=100
+        self.seed = 100   # seed for dataset generation
+        self.log_interval = 100
         self.eval_freq = 5
 
         self.device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
-        self.dataset = 'imagenet'#cifar #mnist #imagenet
+        self.dataset = 'imagenet'#cifar #mnist #imagenet #imagenet_full
 
+        self.warmup = False
         self.epochs = 600
-        self.lr=2e-3
-        self.decay=0.95
-        self.batch_size=32
+        self.lr = 2e-3
+        self.decay = 0.95
+        self.batch_size = 32
 
         self.model_name = "bbans"
         self.bbc_scheme = 'BBC'
@@ -23,12 +24,12 @@ class Config_bbans(object):
 
         class Model_hparam:
             def __init__(self, batch_size, dataset):
-                self.batch_size=batch_size
+                self.batch_size = batch_size
                 if dataset == "mnist":
-                    self.z_size=50
-                    self.h_size=200
+                    self.z_size = 50
+                    self.h_size = 200
                 else:
-                    self.h_size=128
+                    self.h_size = 128
                 self.xdim = None
 
         self.model_hparam = Model_hparam(self.batch_size, self.dataset)
@@ -39,9 +40,9 @@ class Config_bbans(object):
 
         class Compress_hparam:
             def __init__(self, device):
-                self.prior_precision=8
-                self.obs_precision=14
-                self.q_precision=14
+                self.prior_precision = 8
+                self.obs_precision = 14
+                self.q_precision = 14
                 self.batch_size = 1
                 self.device = device
 
@@ -54,13 +55,14 @@ class Config_bitswap(object):
         self.log_interval = 100  # interval for logging/printing of relevant values
         self.eval_freq = 5
 
-        self.device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device('cuda:4' if torch.cuda.is_available() else 'cpu')
         self.dataset = 'cifar'#'cifar'#'mnist'#'imagenet'
 
+        self.warmup = False
         self.epochs = 600
-        self.lr = 5e-4
-        self.decay = 1
-        self.batch_size = 64
+        self.lr = 5e-4# 1:600 epoch:1e-3, 600:1200 epoch:5e-4
+        self.decay = 1#0.9999  # 1:600 epoch:0.999, 600:1200 epoch:1
+        self.batch_size = 32 # 1:600 epoch:64, 600:1200 epoch:32
 
         self.model_name = 'bitswap'
         self.bbc_scheme = 'bitswap'
@@ -68,13 +70,13 @@ class Config_bitswap(object):
 
         class Model_hparam:
             def __init__(self):
-                self.nz=8  # number of latent variables
-                self.zchannels=8  # number of channels for the latent variables
-                self.nprocessing=4  # number of processing layers
-                self.resdepth=8  # number of ResNet blocks
-                self.reswidth=256  # number of channels in the convolutions in the ResNet blocks
-                self.kernel_size=3  # size of the convolutional filter (kernel) in the ResNet blocks
-                self.dropout_p=0.3
+                self.nz = 8  # number of latent variables
+                self.zchannels = 8  # number of channels for the latent variables
+                self.nprocessing = 4  # number of processing layers
+                self.resdepth = 8  # number of ResNet blocks
+                self.reswidth = 256  # number of channels in the convolutions in the ResNet blocks
+                self.kernel_size = 3  # size of the convolutional filter (kernel) in the ResNet blocks
+                self.dropout_p = 0.3
                 self.xdim = None
         
         self.model_hparam = Model_hparam()
@@ -100,17 +102,18 @@ class Config_bitswap(object):
 
 class Config_hilloc(object):
     def __init__(self):
-        self.seed=199   # seed for dataset generation
-        self.log_interval=500
+        self.seed = 199   # seed for dataset generation
+        self.log_interval = 500
         self.eval_freq = 5
 
-        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')#torch.device('cpu')
-        self.dataset = 'mnist'#cifar #mnist #imagenet #imagenet_full
+        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        self.dataset = 'mnist'#cifar #mnist #imagenet #imagenet_full #imagenet_full
 
+        self.warmup = False
         self.epochs = 600
-        self.lr=2e-3
-        self.decay=0.995
-        self.batch_size=64
+        self.lr = 2e-3
+        self.decay = 0.995
+        self.batch_size = 64
 
         self.model_name = "hilloc"
         self.bbc_scheme = 'BBC'
@@ -118,12 +121,12 @@ class Config_hilloc(object):
 
         class Model_hparam:
             def __init__(self):
-                self.n_blocks=4#24
-                self.depth=1 # should be 1
-                self.z_size=32
-                self.h_size=160
-                self.enable_iaf=False
-                self.free_bits=0.1
+                self.n_blocks = 24
+                self.depth = 1# should be 1
+                self.z_size = 32
+                self.h_size = 160
+                self.enable_iaf = False
+                self.free_bits = 0.1
                 self.bidirectional = True
                 self.xdim = None
 
@@ -135,31 +138,32 @@ class Config_hilloc(object):
 
         class Compress_hparam:
             def __init__(self, device):
-                self.prior_precision=10
-                self.obs_precision=24
-                self.q_precision=18
-                self.batch_size=1
+                self.prior_precision = 10
+                self.obs_precision = 24
+                self.q_precision = 18
+                self.batch_size = 1
                 self.device = device
-                self.compression_exclude_sizes=False
-                self.n_flif=0   # number of images to compress with FLIF to start the bb chain (bbans mode)
-                self.initial_bits=int(1e5)#1e8  # if n_flif==0 then use a random message with this many bits
+                self.compression_exclude_sizes = False
+                self.n_flif = 0   # number of images to compress with FLIF to start the bb chain (bbans mode)
+                self.initial_bits = int(1e5)#1e8  # if n_flif == 0 then use a random message with this many bits
 
         self.compress_hparam = Compress_hparam(self.device)
 
 
 class Config_shvc(object):
     def __init__(self):
-        self.seed=199   # seed for dataset generation
-        self.log_interval=500
+        self.seed = 199
+        self.log_interval = 1000
         self.eval_freq = 5
 
-        self.device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')#torch.device('cpu')
-        self.dataset = 'cifar'#cifar #mnist #imagenet
+        self.device = torch.device('cuda:4' if torch.cuda.is_available() else 'cpu')
+        self.dataset = 'cifar'#cifar #mnist #imagenet #imagenet_full
 
+        self.warmup = True
         self.epochs = 1000
-        self.lr=5e-4
-        self.decay=0.9961
-        self.batch_size=128
+        self.lr = 1e-3#5e-4
+        self.decay = 0.999#0.9961
+        self.batch_size = 32
 
         self.model_name = "shvc"
         self.bbc_scheme = 'bitswap'
@@ -167,8 +171,14 @@ class Config_shvc(object):
 
         class Model_hparam:
             def __init__(self):
-                # self.n_blocks=8
-                # self.h_size=128
+                self.nz = 3  # number of latent variables
+                self.zchannels = 32  # number of channels for the latent variables
+                self.nprocessing = 3  # number of processing layers
+                self.resdepth = 9  # number of ResNet blocks
+                self.reswidth = 256  # number of channels in the convolutions in the ResNet blocks
+                self.kernel_size = 3  # size of the convolutional filter (kernel) in the ResNet blocks
+                self.dropout_p = 0.3
+                self.lamb = 0.01
                 self.xdim = None
 
         self.model_hparam = Model_hparam()
@@ -179,11 +189,11 @@ class Config_shvc(object):
 
         class Compress_hparam:
             def __init__(self, device):
-                self.prior_precision=10
-                self.obs_precision=24
-                self.q_precision=18
-                self.batch_size=1
+                self.prior_precision = 10
+                self.obs_precision = 24
+                self.q_precision = 18
+                self.batch_size = 1
                 self.device = device
-                self.initial_bits=int(1e5)#1e8  # if n_flif==0 then use a random message with this many bits
+                self.initial_bits = int(1e5)#1e8  # if n_flif == 0 then use a random message with this many bits
 
         self.compress_hparam = Compress_hparam(self.device)

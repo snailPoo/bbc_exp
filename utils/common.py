@@ -112,7 +112,7 @@ def load_model(model_name, model_pt, hparam, lr, decay):
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=decay)
 
     elif model_name == 'shvc':
-        model = Simple_SHVC(hparam)
+        model = SHVC_VAE(hparam) #Simple_SHVC(hparam)
         optimizer = optim.Adam(model.parameters(), lr=lr)
         scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=decay, last_epoch=- 1, verbose=True)
 
