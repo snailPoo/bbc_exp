@@ -196,7 +196,7 @@ class IAFLayer(nn.Module):
             # print(f'{pz_mean=} {pz_logsd=}')
             # print(f'{self.qz_mean=} {self.qz_logsd=}')
             # print(f'{rz_mean=} {rz_logsd=}')
-            print(f'log_q:{logqs.sum(dim=(1,2,3)).mean() / (np.log(2.) * 3072)}, log_p:{(-logps).sum(dim=(1,2,3)).mean() / (np.log(2.) * 3072)}')
+            # print(f'log_q:{logqs.sum(dim=(1,2,3)).mean() / (np.log(2.) * 3072)}, log_p:{(-logps).sum(dim=(1,2,3)).mean() / (np.log(2.) * 3072)}')
             # free bits (doing as in the original repo, even if weird)
             kl_obj = kl_cost.sum(dim=(-2, -1)).mean(dim=0, keepdim=True)
             kl_obj = kl_obj.clamp(min=self.free_bits)
