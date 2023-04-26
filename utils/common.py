@@ -71,13 +71,13 @@ def load_data(dataset, model_name, load_train=True):
             train_set = datasets.CIFAR10(root="./data/cifar",  train=True, transform=transform, download=True)
         test_set  = datasets.CIFAR10(root="./data/cifar", train=False, transform=transform, download=True)
     
-    elif dataset == "imagenet" or dataset == "imagenetcrop":
+    elif dataset == "imagenet" or dataset == "imagenet_full":
         if load_train:
             train_set = ImageNetDataset('./data/imagenet/train_32', transform=transform)
         test_set  = ImageNetDataset('./data/imagenet/val_32'  , transform=transform)
     
     elif dataset == "mnist":
-        if model_name != 'bbans':
+        if model_name == 'bitswap':
             transform = transform_28
         if load_train:
             train_set = datasets.MNIST(root="./data/mnist", train=True, download=True, 
