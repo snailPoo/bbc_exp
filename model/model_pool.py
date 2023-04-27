@@ -107,6 +107,7 @@ class BetaBinomialVAE(nn.Module):
                    'results/epoch_{}_recon.png'.format(epoch))
 
 from torch import nn
+from torchvision.models import resnet18
 
 class BetaBinomial_Conv_VAE(nn.Module):
     def __init__(self, hparam):
@@ -119,14 +120,15 @@ class BetaBinomial_Conv_VAE(nn.Module):
         self.register_buffer('prior_std', torch.ones(1))
         self.n = torch.ones(hparam.batch_size, *self.xdim) * 255.
 
-        self.conv11 = nn.Conv2d(self.xdim[0], h_dim, 4, 2, 1)
-        self.conv12 = nn.Conv2d(h_dim, h_dim, 3, 1, 1)
-        self.conv13 = nn.Conv2d(h_dim, h_dim, 3, 1, 1)
-        self.conv2 = nn.Conv2d(h_dim, self.xdim[0] * 2, 3, 1, 1)
-        self.conv31 = nn.Conv2d(3, h_dim, 3, 1, 1)
-        self.conv32 = nn.Conv2d(h_dim, h_dim, 3, 1, 1)
-        self.conv33 = nn.Conv2d(h_dim, h_dim, 3, 1, 1)
-        self.conv4 = nn.ConvTranspose2d(h_dim, self.xdim[0] * 2, 4, 2, 1)
+        # self.conv1 = nn.Conv2d(self.xdim[0], h_dim, 4, 2, 1) # downsampling
+        self.conv1 = nn.Conv2d(self.xdim[0], h_dim, 3, 1, 1) # without downsampling
+        self.conv2 = nn.Conv2d(h_dim, h_dim, 3, 1, 1)
+        self.conv3 = nn.Conv2d(h_dim, self.xdim[0] * 2, 3, 1, 1)
+
+        self.conv4 = nn.Conv2d(self.xdim[0], h_dim, 3, 1, 1)
+        self.conv5 = nn.Conv2d(h_dim, h_dim, 3, 1, 1)
+        # self.conv4 = nn.ConvTranspose2d(h_dim, self.xdim[0] * 2, 4, 2, 1) # downsampling
+        self.conv6 = nn.Conv2d(h_dim, self.xdim[0] * 2, 3, 1, 1) # without downsampling
 
         self.best_elbo = np.inf
         self.logger = None
@@ -134,10 +136,20 @@ class BetaBinomial_Conv_VAE(nn.Module):
     def encode(self, x):
         """Return mu, sigma on latent"""
         h = x / 255.  # otherwise we will have numerical issues
-        h = self.conv13(self.conv12((self.conv11(h))))
-        h = self.conv2(h)
+        h = F.relu(self.conv1(h))
+        h = F.relu(self.conv2(h))
+        h = self.conv3(h)
         mean, logsd = h.split([self.xdim[0],self.xdim[0]], 1)
-        return mean, torch.exp(logsd)
+        std = 0.1 + 0.9 * torch.sigmoid(torch.exp(logsd) + 2.)
+        return mean, std
+
+    def decode(self, z):
+        h = F.relu(self.conv4(z))
+        h = F.relu(self.conv5(h))
+        h = self.conv6(h)
+        log_alpha, log_beta = h.split([self.xdim[0],self.xdim[0]], 1)
+        alpha, beta = torch.exp(log_alpha), torch.exp(log_beta)
+        return torch.clamp(alpha, 0.6, 20), torch.clamp(beta, 0.6, 20)
 
     def reparameterize(self, mu, std):
         if self.training:
@@ -145,13 +157,7 @@ class BetaBinomial_Conv_VAE(nn.Module):
             return eps.mul(std).add_(mu)
         else:
             return mu
-
-    def decode(self, z):
-        h = self.conv33(self.conv32((self.conv31(z))))
-        h = self.conv4(h)
-        log_alpha, log_beta= h.split([self.xdim[0],self.xdim[0]], 1)
-        return torch.exp(log_alpha), torch.exp(log_beta)
-
+    
     def loss(self, x, tag):
         z_mu, z_std = self.encode(x)
         z = self.reparameterize(z_mu, z_std)  # sample zs
