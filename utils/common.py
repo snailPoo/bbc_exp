@@ -77,7 +77,7 @@ def load_data(dataset, model_name, load_train=True):
         test_set  = ImageNetDataset('./data/imagenet/val_32'  , transform=transform)
     
     elif dataset == "mnist":
-        if model_name == 'bitswap':
+        if model_name == 'bitswap' or model_name == 'shvc':
             transform = transform_28
         if load_train:
             train_set = datasets.MNIST(root="./data/mnist", train=True, download=True, 
@@ -114,7 +114,7 @@ def load_model(model_name, model_pt, hparam, lr, decay):
     elif model_name == 'shvc':
         model = SHVC_VAE(hparam) #Simple_SHVC(hparam)
         optimizer = optim.Adam(model.parameters(), lr=lr)
-        scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=decay, last_epoch=- 1, verbose=True)
+        scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=decay, last_epoch=-1, verbose=True)
 
     if os.path.exists(model_pt):
         print('load pre-trained weights')

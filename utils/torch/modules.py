@@ -118,10 +118,10 @@ class IAFLayer(nn.Module):
         
         self.z_size        = hparam.z_size
         self.h_size        = hparam.h_size
-        self.enable_iaf    = hparam.enable_iaf
         self.free_bits     = hparam.free_bits
         # posterior is bidirectional - i.e. has a deterministic upper pass but top down sampling.
         self.bidirectional = hparam.bidirectional # True for bidirectional, False for bottom-up inference
+        self.enable_iaf    = False
         self.ds            = downsample
 
         if downsample:
@@ -392,8 +392,9 @@ def lossless_downsample(input, factor=2):
 	x = input.view(B, C, H // factor, factor, W // factor, factor)
 	x = x.permute(0, 1, 3, 5, 2, 4).contiguous()
 	x = x.view(B, C * factor * factor, H // factor, W // factor)
-	permute = (0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11)
-	x = x[:, permute]
+	if C == 3:
+		permute = (0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11)
+		x = x[:, permute]
 	return x
 
 from utils.torch.module_shvc import Conv2dLSTM

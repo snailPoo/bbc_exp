@@ -107,7 +107,6 @@ class BetaBinomialVAE(nn.Module):
                    'results/epoch_{}_recon.png'.format(epoch))
 
 from torch import nn
-from torchvision.models import resnet18
 
 class BetaBinomial_Conv_VAE(nn.Module):
     def __init__(self, hparam):
@@ -819,9 +818,9 @@ class Convolutional_VAE(nn.Module):
         super(Convolutional_VAE, self).__init__()
 
         self.h_size = hparam.h_size
-        self.depth = hparam.depth
         self.n_blocks = hparam.n_blocks
         self.xdim = hparam.xdim
+        self.depth = 1 # should be 1
 
         self.best_elbo = np.inf
         self.num_pixels = np.prod(self.xdim)
@@ -989,20 +988,15 @@ class ChannelPriorUniScale(nn.Module):
 
         log_p = torch.zeros((x.size(0), x.size(1))).to(x.device) # (B, num_total_channel)
         if self.xorz:
-            if not self.z1_cond:
-                # encode x_i ~ p(x_i|x_1:i-1), i = 12, ..., s+1
-                for i in range(x.size(1)-1, int(s), -1):
-                    y = x[:, i, :, :, :]
-                    param = D_params[:, i, :, :, :]
-                    # it should be (B, H, W, C) -> (B, C) in general
-                    # but C=1 in my case, so -> (B, )
-                    log_p[:,i] += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=(1,2,3))
-            else:
-                # encode x_i ~ p(x_i|x_1:i-1, z1), i = s, ..., 1
-                for i in range(int(s), -1, -1):
-                    y = x[:, i, :, :, :]
-                    param = D_params[:, i, :, :, :]
-                    log_p[:,i] += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=(1,2,3))
+            # encode x_i ~ p(x_i|x_1:i-1), i = 12, ..., s+1
+            # encode x_i ~ p(x_i|x_1:i-1, z1), i = s, ..., 1
+            f = x.size(1)-1 if not self.z1_cond else int(s)
+            t =      int(s) if not self.z1_cond else     -1
+            for i in range(f, t, -1):
+                y = x[:, i, :, :, :]
+                param = D_params[:, i, :, :, :]
+                # it should be (B, H, W, C) -> (B, C) in general, but C=1 in my case, so -> (B, )
+                log_p[:,i] += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=(1,2,3))
         else: 
             # encode z ~ p(z_i|z_1:i-1)
             for i in range(x.size(1)-1, -1, -1):
@@ -1252,7 +1246,7 @@ class SHVC_VAE(nn.Module):
         self.act = nn.ELU()
         self.actresnet = nn.ELU()
 
-        self.register_parameter('s', nn.Parameter(torch.tensor(9.)))
+        self.register_parameter('s', nn.Parameter(torch.tensor(self.xdim[0]*3/4)))
 
         # Below we build up the main model architecture of the inference- and generative-models
         # All the architecure components are built up from different custom are existing PyTorch modules
@@ -1264,10 +1258,10 @@ class SHVC_VAE(nn.Module):
         # <===== INFERENCE MODEL =====>
         # the bottom (zi=1) inference model
         self.infer_in = nn.Sequential(
-            # shape: [s,16,16] -> [4s,8,8]
+            # shape: [4C,16,16] -> [16C,8,8]
             modules.Squeeze2d(factor=2),
 
-            # shape: [4s,8,8] -> [rw,8,8]
+            # shape: [16C,8,8] -> [rw,8,8]
             modules.WnConv2d(4 * self.xdim[0],
                              self.reswidth,
                              5,
@@ -1630,8 +1624,7 @@ class SHVC_VAE(nn.Module):
         init_save = self.p_x_given_ARx(x, self.s) # (B, C)
         logrecon += init_save
         init_save = torch.sum(init_save, dim=1)
-
-        # x[:, int(self.s)+1:,] = 0
+        x[:, int(self.s)+1:,] = 0
 
         for i in range(self.nz):
             # ********************************* inference model *********************************
@@ -1686,15 +1679,25 @@ class SHVC_VAE(nn.Module):
         # scale by image dimensions to get "bits/dim"
         elbo *= self.perdimsscale
 
-        # print(f'logrecon:\n{-logrecon * self.perdimsscale}')
-        # print(f'logdec:\n{-torch.sum(logdec, dim=1) * self.perdimsscale}')
-        # print(f'logenc:\n{torch.sum(logenc, dim=1) * self.perdimsscale}')
-        # penalty = self.lamb * torch.mean(torch.max(torch.tensor(0.), - init_cost + init_save))
-        # print(f'{elbo=}, {penalty=}')
+        penalty = torch.mean(torch.max(torch.tensor(0.), - init_cost + init_save)) * self.bitsscale * self.perdimsscale #self.lamb * 
+        
         self.logger.add_scalar(f'elbo/{tag}', elbo, self.global_step)
+        self.logger.add_scalar(f'init_cost/{tag}', torch.mean(init_cost) * self.bitsscale * self.perdimsscale, self.global_step)
+        self.logger.add_scalar(f'init_save/{tag}', torch.mean(init_save) * self.bitsscale * self.perdimsscale, self.global_step)
+        self.logger.add_scalar(f'penalty/{tag}', penalty, self.global_step)
 
+        # compute the inference- and generative-model loss
+        entrecon = (-1) * logrecon * self.perdimsscale
+        entenc = torch.sum(logenc, dim=1) * self.perdimsscale
+        entdec = (-1) * torch.sum(logdec, dim=1) * self.perdimsscale
+        for i in range(0, entrecon.shape[0]):
+            self.logger.add_scalar(f'x/c{i+1}/{tag}', entrecon[i], self.global_step)
+        for i in range(0, entenc.shape[0]):
+            self.logger.add_scalar(f'z{i+1}/encoder/{tag}', entenc[i], self.global_step)
+            self.logger.add_scalar(f'z{i+1}/decoder/{tag}', entdec[i], self.global_step)
 
-        return elbo, None
+        # print(f'{elbo.item()=}, {penalty.item()=}')
+        return elbo + penalty, None
 
     # function to sample from the model (using the generative model)
     def sample(self, device, epoch, num=64):
