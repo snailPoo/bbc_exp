@@ -9,12 +9,12 @@ import torch
 import os
 import pickle
 
-from config import Config_hilloc
+from config import *
 from codec.bbc_scheme import ResNetVAE, custom_ResNetVAE
-from utils.common import load_data, load_model, same_seed
+from utils.common import load_data, load_model, load_scheme, same_seed
 
 
-cf = Config_hilloc()
+cf = Config_bbans() # Config_bbans # Config_hilloc
 cf_compress = cf.compress_hparam
 cf_model = cf.model_hparam
 
@@ -25,16 +25,11 @@ print(f"Model:{cf.model_name}; Dataset:{cf.dataset}")
 # ******* data ********
 _, test_set = load_data(cf.dataset, cf.model_name, load_train=False)
 cf_model.xdim = test_set[0][0].shape
-# export PYTHONPATH=$PYTHONPATH:../
-num_images = 1000#len(test_set)
+
+num_images = len(test_set)
 batch_size = cf_compress.batch_size
 n_batches = num_images // batch_size
 
-# ******* model *******
-model, _, _ = load_model(cf.model_name, cf.model_pt, 
-                         cf_model, cf.lr, cf.decay)
-model.eval().to(cf.device)
-# *********************
 # **********************
 test_loader = DataLoader(
     dataset=test_set, sampler=None, 
@@ -44,27 +39,20 @@ images = []
 for i, x in enumerate(test_loader):
     if i == n_batches:
         break
-    # print(i)
-    # c = x[0]
-    # elbo, _ = model.loss(c.to(cf.device), 'test')
-    # c = x[0].numpy().astype(np.uint64)
-    # c = torch.from_numpy(c.astype(np.float32))
-    # elbo, _ = model.loss(c.to(cf.device), 'test')
     images.append(x[0].numpy().astype(np.uint64))
-# **********************
-# images = [np.transpose(np.array([image]).astype('uint64'), (0, 3, 1, 2))
-#           for image in test_set.data]
-# images = images[:num_images]
-# **********************
 
-num_dims = num_images * np.prod(cf_model.xdim)# np.sum([img.size for img in images])
+num_dims = num_images * np.prod(cf_model.xdim)
 print(f'num data: {len(images)} x {images[0].shape}')
 # *********************
 
-
+# ******* model *******
+model, _, _ = load_model(cf.model_name, cf.model_pt, 
+                         cf_model, cf.lr, cf.decay)
+model.eval().to(cf.device)
+# *********************
 
 # ******* codec *******
-scheme = ResNetVAE(cf_compress, model)#custom_ResNetVAE
+scheme = load_scheme(cf.model_name, cf_compress, model)
 
 codec_shape = (batch_size, *cf_model.xdim)
 print(f"Creating codec for shape {codec_shape}")
@@ -76,12 +64,13 @@ def vae_view(head):
     return ag_tuple((np.reshape(head[:latent_dims], latent_shape),
                      np.reshape(head[latent_dims:],  codec_shape)))
 
-codec = lambda: cs.repeat(cs.substack(scheme, vae_view), len(images))
+codec = lambda: cs.repeat(cs.substack(scheme, vae_view), n_batches)
 vae_push, vae_pop = codec()
 # *********************
 
 # ******* state *******
 init_t0 = time.time()
+
 state_path = f"bitstreams/initial_bit_{cf_compress.initial_bits}.pkl"
 if os.path.exists(state_path):
     print('load init state')
@@ -92,8 +81,10 @@ else:
     state = cs.random_message(cf_compress.initial_bits, (1,))
     with open(state_path, 'wb') as f:
         pickle.dump(state, f)
+
 init_head_shape = (np.prod(codec_shape) + np.prod(latent_shape),)
 state = cs.reshape_head(state, init_head_shape)
+
 init_t = time.time() - init_t0
 print("Initialization time: {:.2f}s".format(init_t))
 # *********************

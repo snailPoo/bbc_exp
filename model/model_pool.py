@@ -112,6 +112,7 @@ class BetaBinomial_Conv_VAE(nn.Module):
     def __init__(self, hparam):
         super().__init__()
         h_dim = hparam.h_size
+        self.z_dim = hparam.z_size
         self.xdim = hparam.xdim
         self.x_flat = np.prod(self.xdim)
 
@@ -119,15 +120,15 @@ class BetaBinomial_Conv_VAE(nn.Module):
         self.register_buffer('prior_std', torch.ones(1))
         self.n = torch.ones(hparam.batch_size, *self.xdim) * 255.
 
-        # self.conv1 = nn.Conv2d(self.xdim[0], h_dim, 4, 2, 1) # downsampling
-        self.conv1 = nn.Conv2d(self.xdim[0], h_dim, 3, 1, 1) # without downsampling
+        self.conv1 = nn.Conv2d(self.xdim[0], h_dim, 4, 2, 1) # downsampling
+        # self.conv1 = nn.Conv2d(self.xdim[0], h_dim, 3, 1, 1) # without downsampling
         self.conv2 = nn.Conv2d(h_dim, h_dim, 3, 1, 1)
-        self.conv3 = nn.Conv2d(h_dim, self.xdim[0] * 2, 3, 1, 1)
+        self.conv3 = nn.Conv2d(h_dim, self.z_dim * 2, 3, 1, 1)
 
-        self.conv4 = nn.Conv2d(self.xdim[0], h_dim, 3, 1, 1)
+        self.conv4 = nn.Conv2d(self.z_dim, h_dim, 3, 1, 1)
         self.conv5 = nn.Conv2d(h_dim, h_dim, 3, 1, 1)
-        # self.conv4 = nn.ConvTranspose2d(h_dim, self.xdim[0] * 2, 4, 2, 1) # downsampling
-        self.conv6 = nn.Conv2d(h_dim, self.xdim[0] * 2, 3, 1, 1) # without downsampling
+        self.conv6 = nn.ConvTranspose2d(h_dim, self.xdim[0] * 2, 4, 2, 1) # downsampling
+        # self.conv6 = nn.Conv2d(h_dim, self.xdim[0] * 2, 3, 1, 1) # without downsampling
 
         self.best_elbo = np.inf
         self.logger = None
@@ -138,7 +139,7 @@ class BetaBinomial_Conv_VAE(nn.Module):
         h = F.relu(self.conv1(h))
         h = F.relu(self.conv2(h))
         h = self.conv3(h)
-        mean, logsd = h.split([self.xdim[0],self.xdim[0]], 1)
+        mean, logsd = h.split([self.z_dim, self.z_dim], 1)
         std = 0.1 + 0.9 * torch.sigmoid(torch.exp(logsd) + 2.)
         return mean, std
 

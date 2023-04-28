@@ -169,34 +169,45 @@ def torch_fun_to_numpy_fun(fun):
         return tensor_to_ndarray(fun(*torch_args, **kwargs))
     return numpy_fun
 
-def VAE(gen_net, rec_net, obs_codec, prior_prec, latent_prec, device):
+from utils.distributions import generate_beta_binomial_probs
+
+def VAE(config, model):
     """
     This codec uses the BB-ANS algorithm to code data which is distributed
     according to a variational auto-encoder (VAE) model. It is assumed that the
     VAE uses an isotropic Gaussian prior and diagonal Gaussian for its
     posterior.
     """
+    prior_prec = config.prior_precision
+    latent_prec = config.q_precision
+    obs_precision = config.obs_precision
+
     z_view = lambda head: head[0]
     x_view = lambda head: head[1]
 
     prior = substack(Uniform(prior_prec), z_view)
+    prior_inv_cdf = std_gaussian_centres(prior_prec)
 
+    device = config.device
+
+    @torch.no_grad()
     def likelihood(latent_idxs):
-        z = std_gaussian_centres(prior_prec)[latent_idxs]
-        x = gen_net(ndarray_to_tensor(z).to(device))
+        z = prior_inv_cdf[latent_idxs]
+        x = model.decode(torch.from_numpy(z.astype(np.float32)).to(device))
+        obs_codec = lambda x: cs.Categorical(generate_beta_binomial_probs(*x, torch.tensor(255)), obs_precision)
         return substack(obs_codec(x), x_view)
-
+    
+    @torch.no_grad()
     def posterior(data):
-        x = ndarray_to_tensor(data).to(device)
-        post_mean, post_stdd = rec_net(x)
+        x = torch.from_numpy(data.astype(np.float32)).to(device)
+        post_mean, post_stdd = model.encode(x)
         return substack(DiagGaussian_StdBins(
-                            tensor_to_ndarray(post_mean), 
-                            tensor_to_ndarray(post_stdd), 
+                            post_mean.cpu().numpy(), 
+                            post_stdd.cpu().numpy(), 
                             latent_prec, prior_prec), 
                         z_view)
     return BBANS(prior, likelihood, posterior)
 
-from utils.distributions import DiagonalGaussian, discretized_logistic
 
 def ResNetVAE(config, model):
     """
