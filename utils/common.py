@@ -125,3 +125,10 @@ def load_model(model_name, model_pt, hparam, lr, decay):
         print('weights not founnd')
 
     return model, optimizer, scheduler
+
+from codec.bbc_scheme import VAE, ResNetVAE
+def load_scheme(model_name, config, model):
+    if model_name == 'bbans':
+        return VAE(config, model)
+    elif model_name == 'hilloc':
+        return ResNet_VAE(config, model)
