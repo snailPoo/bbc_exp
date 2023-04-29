@@ -93,11 +93,7 @@ def load_model(model_name, model_pt, hparam, lr, decay):
     print("load model")
 
     if model_name == 'bbans':
-        model = BetaVAE(hparam)
-        # if hparam.xdim[0] == 1:
-        #     model = BetaBinomialVAE(hparam)
-        # else:
-        #     model = BetaBinomial_Conv_VAE(hparam)
+        model = BetaBinomialVAE(hparam)
         optimizer = optim.Adam(model.parameters(), lr=lr)
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=decay)
 
