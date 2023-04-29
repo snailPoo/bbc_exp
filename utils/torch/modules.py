@@ -378,24 +378,20 @@ class Conv1x1Net(nn.Module):
 
         return x
 
-# x with shape (C, H, W) lossless downsampled to (4*C, H/2, W/2)
+# x with shape (B, C, H, W) lossless downsampled to (B, 4*C, H/2, W/2)
 def lossless_downsample(input, factor=2):
-	#assert factor >= 1 and isinstance(factor, int)
-	if factor == 1:
-		return input
-	size = input.size()
-	B = size[0]
-	C = size[1]
-	H = size[2]
-	W = size[3]
-	assert H % factor == 0 and W % factor == 0, "{}".format((H, W))
-	x = input.view(B, C, H // factor, factor, W // factor, factor)
-	x = x.permute(0, 1, 3, 5, 2, 4).contiguous()
-	x = x.view(B, C * factor * factor, H // factor, W // factor)
-	if C == 3:
-		permute = (0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11)
-		x = x[:, permute]
-	return x
+    if factor == 1:
+        return input
+    B, C, H, W = input.size()
+    assert H % factor == 0 and W % factor == 0, "{}".format((H, W))
+    H_, W_ = H // factor, W // factor
+    x = input.view(B, C, H_, factor, W_, factor)
+    x = x.permute(0, 1, 3, 5, 2, 4).contiguous()
+    x = x.view(B, C, factor * factor, H_, W_)
+    x = torch.swapaxes(x, 1, 2).reshape((B, -1, H_, W_))
+
+    return x
+
 
 from utils.torch.module_shvc import Conv2dLSTM
 

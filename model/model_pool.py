@@ -106,182 +106,7 @@ class BetaBinomialVAE(nn.Module):
         save_image(x_with_recon.view(64, *self.xdim),
                    'results/epoch_{}_recon.png'.format(epoch))
 
-from torch import nn
-
-from typing import List, Callable, Union, Any, TypeVar, Tuple
-Tensor = TypeVar('torch.tensor')
-
-
-class BetaVAE(nn.Module):
-
-    num_iter = 0 # Global static variable to keep track of iterations
-
-    def __init__(self,
-                 hparam, 
-                 h_dims: List = None,
-                 beta: int = 4,
-                 gamma:float = 1000.,
-                 max_capacity: int = 25,
-                 Capacity_max_iter: int = 1e5,
-                 loss_type:str = 'B',
-                 **kwargs) -> None:
-        super(BetaVAE, self).__init__()
-
-        self.x_dim = hparam.xdim
-        self.latent_dim = hparam.z_size
-        self.beta = beta
-        self.gamma = gamma
-        self.loss_type = loss_type
-        self.C_max = torch.Tensor([max_capacity])
-        self.C_stop_iter = Capacity_max_iter
-
-        modules = []
-        if h_dims is None:
-            self.h_dims = [32, 64]
-        else:
-            self.h_dims = h_dims
-        self.out_H, self.out_W = (x_dim[1] >> len(self.h_dims)), (x_dim[2] >> len(self.h_dims))
-
-        in_dim = self.x_dim[0]
-        # Build Encoder
-        for h_dim in self.h_dims:
-            modules.append(
-                nn.Sequential(
-                    nn.Conv2d(in_dim, out_channels=h_dim,
-                              kernel_size= 3, stride= 2, padding  = 1),
-                    nn.BatchNorm2d(h_dim),
-                    nn.LeakyReLU())
-            )
-            in_dim = h_dim
-
-        self.encoder = nn.Sequential(*modules)
-        self.fc_mu = nn.Linear(self.h_dims[-1] * (self.out_H * self.out_W), latent_dim)
-        self.fc_var = nn.Linear(self.h_dims[-1] * (self.out_H * self.out_W), latent_dim)
-
-
-        # Build Decoder
-        modules = []
-
-        self.decoder_input = nn.Linear(latent_dim, self.h_dims[-1] * (self.out_H * self.out_W))
-
-        for i in range(1, len(self.h_dims)):
-            modules.append(
-                nn.Sequential(
-                    nn.ConvTranspose2d(self.h_dims[-i],
-                                       self.h_dims[-i-1],
-                                       kernel_size=3,
-                                       stride = 2,
-                                       padding=1,
-                                       output_padding=1),
-                    nn.BatchNorm2d(self.h_dims[-i-1]),
-                    nn.LeakyReLU())
-            )
-
-
-
-        self.decoder = nn.Sequential(*modules)
-
-        self.final_layer = nn.Sequential(
-                            nn.ConvTranspose2d(self.h_dims[0],
-                                               self.h_dims[0],
-                                               kernel_size=3,
-                                               stride=2,
-                                               padding=1,
-                                               output_padding=1),
-                            nn.BatchNorm2d(self.h_dims[0]),
-                            nn.LeakyReLU(),
-                            nn.Conv2d(self.h_dims[0], out_channels= self.x_dim[0],
-                                      kernel_size= 3, padding= 1),
-                            nn.Tanh())
-
-    def encode(self, input: Tensor) -> List[Tensor]:
-        """
-        Encodes the input by passing through the encoder network
-        and returns the latent codes.
-        :param input: (Tensor) Input tensor to encoder [N x C x H x W]
-        :return: (Tensor) List of latent codes
-        """
-        result = self.encoder(input)
-        result = torch.flatten(result, start_dim=1)
-
-        # Split the result into mu and var components
-        # of the latent Gaussian distribution
-        mu = self.fc_mu(result)
-        log_var = self.fc_var(result)
-
-        return [mu, log_var]
-
-    def decode(self, z: Tensor) -> Tensor:
-        result = self.decoder_input(z)
-        result = result.view(-1, self.h_dims[-1], self.out_H, self.out_W)
-        result = self.decoder(result)
-        result = self.final_layer(result)
-        return result
-
-    def reparameterize(self, mu: Tensor, logvar: Tensor) -> Tensor:
-        """
-        Will a single z be enough ti compute the expectation
-        for the loss??
-        :param mu: (Tensor) Mean of the latent Gaussian
-        :param logvar: (Tensor) Standard deviation of the latent Gaussian
-        :return:
-        """
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return eps * std + mu
-
-    def forward(self, input: Tensor, **kwargs) -> Tensor:
-        mu, log_var = self.encode(input)
-        z = self.reparameterize(mu, log_var)
-        return  [self.decode(z), mu, log_var]
-
-    def loss(self, input: Tensor, **kwargs) -> float:#-> dict:
-        self.num_iter += 1
-        recons, mu, log_var = self.forward(input)
-        kld_weight = 1#kwargs['M_N']  # Account for the minibatch samples from the dataset
-
-        recons_loss =F.mse_loss(recons, input)
-
-        kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
-
-        if self.loss_type == 'H': # https://openreview.net/forum?id=Sy2fzU9gl
-            loss = recons_loss + self.beta * kld_weight * kld_loss
-        elif self.loss_type == 'B': # https://arxiv.org/pdf/1804.03599.pdf
-            self.C_max = self.C_max.to(input.device)
-            C = torch.clamp(self.C_max/self.C_stop_iter * self.num_iter, 0, self.C_max.data[0])
-            loss = recons_loss + self.gamma * kld_weight* (kld_loss - C).abs()
-        else:
-            raise ValueError('Undefined loss type.')
-
-        return loss#{'loss': loss, 'Reconstruction_Loss':recons_loss, 'KLD':kld_loss}
-
-    def sample(self,
-               num_samples:int,
-               current_device: int, **kwargs) -> Tensor:
-        """
-        Samples from the latent space and return the corresponding
-        image space map.
-        :param num_samples: (Int) Number of samples
-        :param current_device: (Int) Device to run the model
-        :return: (Tensor)
-        """
-        z = torch.randn(num_samples,
-                        self.latent_dim)
-
-        z = z.to(current_device)
-
-        samples = self.decode(z)
-        return samples
-
-    def generate(self, x: Tensor, **kwargs) -> Tensor:
-        """
-        Given an input image x, returns the reconstructed image
-        :param x: (Tensor) [B x C x H x W]
-        :return: (Tensor) [B x C x H x W]
-        """
-
-        return self.forward(x)[0]
-
+'''
 class BetaBinomial_Conv_VAE(nn.Module):
     def __init__(self, hparam):
         super().__init__()
@@ -343,7 +168,7 @@ class BetaBinomial_Conv_VAE(nn.Module):
         p_z = torch.sum(Normal(self.prior_mean, self.prior_std).log_prob(z), dim=(1,2,3))
         q_z = torch.sum(Normal(z_mu, z_std).log_prob(z), dim=(1,2,3))
         return -torch.mean(l + p_z - q_z) * np.log2(np.e) / self.x_flat, None
-
+'''
 
 class ResNet_VAE(nn.Module):
     def __init__(self, hparam):
@@ -1144,7 +969,7 @@ class ChannelPriorUniScale(nn.Module):
         x[prob < self.dp_rate] = 0
         return x    
 
-    def get_likelihood(self, input, s):
+    def get_likelihood(self, input):
         if self.z1_cond:
             x, z1 = input # (B, 4C, H/2, W/2), (B, 32, H/4, W/4)
             z1_embd = self.z1_cond_network(z1) # (B, 4, H/2, W/2)
@@ -1161,27 +986,8 @@ class ChannelPriorUniScale(nn.Module):
 
         D_params, _ = self.prior_lstm(lstm_input) # (B, 4C, 15, H/2, W/2) ## z3: (B, c, 2, h, w)
 
-        log_p = torch.zeros((x.size(0), x.size(1))).to(x.device) # (B, num_total_channel)
-        if self.xorz:
-            # encode x_i ~ p(x_i|x_1:i-1), i = 12, ..., s+1
-            # encode x_i ~ p(x_i|x_1:i-1, z1), i = s, ..., 1
-            f = x.size(1)-1 if not self.z1_cond else int(s)
-            t =      int(s) if not self.z1_cond else     -1
-            for i in range(f, t, -1):
-                y = x[:, i, :, :, :]
-                param = D_params[:, i, :, :, :]
-                # it should be (B, H, W, C) -> (B, C) in general, but C=1 in my case, so -> (B, )
-                log_p[:,i] += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=(1,2,3))
-        else: 
-            # encode z ~ p(z_i|z_1:i-1)
-            for i in range(x.size(1)-1, -1, -1):
-                y = x[:, i, :, :, :] # z3: (B, 1, h, w)
-                param = D_params[:, i, :, :, :] # (B, 2, h, w)
-                mu, logsd = torch.split(param, 1, dim=1) # (B, 1, h, w)
-                scale = 0.1 + 0.9 * modules.softplus(torch.exp(logsd) + np.log(np.exp(1.) - 1.))
-                log_p[:,i] += torch.sum(random.logistic_logp(mu, scale, y), dim=(1,2,3)) # (B, 1, h, w) -> (B, )
+        return D_params
 
-        return log_p
 
     def get_sample(self, r=None):    
         with torch.no_grad():
@@ -1212,9 +1018,9 @@ class ChannelPriorUniScale(nn.Module):
             return x_sample
 
 
-    def forward(self, input, s, reverse=False):    
+    def forward(self, input, reverse=False):    
         if not reverse:
-            return self.get_likelihood(input, s)
+            return self.get_likelihood(input)
         else:
             return self.get_sample(input) # z1
 
@@ -1229,8 +1035,8 @@ class Simple_SHVC(nn.Module):
 
         self.register_parameter('s', nn.Parameter(torch.tensor(9.)))
 
-        self.p_x_given_ARx    = ChannelPriorUniScale(xorz=True, z1_cond=False, kernel_size=5, hidden_size=32, num_layers=3, dp_rate=0)
-        self.p_x_given_ARx_z1 = ChannelPriorUniScale(xorz=True, z1_cond=True,  kernel_size=5, hidden_size=32, num_layers=3, dp_rate=0)
+        self.p_x_l_pre_x    = ChannelPriorUniScale(xorz=True, z1_cond=False, kernel_size=5, hidden_size=32, num_layers=3, dp_rate=0)
+        self.p_x_l_pre_x_z1 = ChannelPriorUniScale(xorz=True, z1_cond=True,  kernel_size=5, hidden_size=32, num_layers=3, dp_rate=0)
 
         self.q_z1_given_x  = modules.Conv1x1Net(self.z_dim[0]-1, 2 * self.z_dim[1], "down")
         self.q_z2_given_z1 = modules.Conv1x1Net(self.z_dim[1]  , 2 * self.z_dim[2], "down")
@@ -1265,10 +1071,10 @@ class Simple_SHVC(nn.Module):
         #     y = x[:, -i, :, :].unsqueeze(1)
         #     pad = torch.zeros((batch_size, self.z_dim[1] + (i - 1), self.H >> 1, self.W >> 1)).to(x.device)
         #     h = torch.cat((x[:, :-i, :, :], pad), dim=1)
-        #     channel_save = torch.sum(random.discretized_mix_logistic_logp(y, self.p_x_given_ARx_z1(h)), dim=(1,2,3))
+        #     channel_save = torch.sum(random.discretized_mix_logistic_logp(y, self.p_x_l_pre_x_z1(h)), dim=(1,2,3))
         #     init_save += channel_save
         #     log_p += channel_save
-        init_save = torch.sum(self.p_x_given_ARx(x, self.s), dim=1)
+        init_save = torch.sum(self.p_x_l_pre_x(x, self.s), dim=1)
         log_p += init_save
         # print(f'encode x_s+1 ~ x_12, init_save: {log_p}')
 
@@ -1293,8 +1099,8 @@ class Simple_SHVC(nn.Module):
         #     y = x[:, i, :, :].unsqueeze(1)
         #     pad = torch.zeros((batch_size, self.z_dim[0] - i - 1, self.H >> 1, self.W >> 1)).to(x.device)
         #     h = torch.cat((x[:, :i, :, :], pad, up_z1), dim=1)
-        #     log_p += torch.sum(random.discretized_mix_logistic_logp(y, self.p_x_given_ARx_z1(h)), dim=(1,2,3))
-        tmp = torch.sum(self.p_x_given_ARx_z1((x, z1), self.s), dim=1)
+        #     log_p += torch.sum(random.discretized_mix_logistic_logp(y, self.p_x_l_pre_x_z1(h)), dim=(1,2,3))
+        tmp = torch.sum(self.p_x_l_pre_x_z1((x, z1), self.s), dim=1)
         log_p += tmp
         # print(f'encode x_1 ~ x_s, log_p add: {tmp}')
 
@@ -1426,9 +1232,9 @@ class SHVC_VAE(nn.Module):
         # Below we build up the main model architecture of the inference- and generative-models
         # All the architecure components are built up from different custom are existing PyTorch modules
 
-        self.p_x_given_ARx    = ChannelPriorUniScale(xorz=True,  z1_cond=False, kernel_size=5, hidden_size=32, num_layers=3, dp_rate=0)
-        self.p_x_given_ARx_z1 = ChannelPriorUniScale(xorz=True,  z1_cond=True,  kernel_size=5, hidden_size=32, num_layers=3, dp_rate=0)
-        self.p_z              = ChannelPriorUniScale(xorz=False, z1_cond=False, kernel_size=3, hidden_size=32, num_layers=3, dp_rate=0)
+        self.p_x_l_pre_x    = ChannelPriorUniScale(xorz=True,  z1_cond=False, kernel_size=5, hidden_size=32, num_layers=3, dp_rate=0)
+        self.p_x_l_pre_x_z1 = ChannelPriorUniScale(xorz=True,  z1_cond=True,  kernel_size=5, hidden_size=32, num_layers=3, dp_rate=0)
+        self.p_z            = ChannelPriorUniScale(xorz=False, z1_cond=False, kernel_size=3, hidden_size=32, num_layers=3, dp_rate=0)
 
         # <===== INFERENCE MODEL =====>
         # the bottom (zi=1) inference model
@@ -1597,62 +1403,6 @@ class SHVC_VAE(nn.Module):
             )
             for _ in range(self.nz - 1)])
 
-        # <===== GENERATIVE MODEL =====>
-        # the bottom (zi = 1) inference model
-        '''
-        self.gen_in = nn.Sequential(
-            # shape: [zc,8,8] -> [rw,8,8]
-            modules.WnConv2d(self.zchannels,
-                             self.reswidth,
-                             self.kernel_size,
-                             1,
-                             padding,
-                             init_scale=1.0,
-                             loggain=True),
-            self.act
-        )
-
-        self.gen_res1 = nn.Sequential(
-            # shape: [rw,8,8] -> [rw,8,8]
-            modules.ResNetBlock(self.reswidth,
-                                self.reswidth,
-                                self.kernel_size,
-                                1,
-                                padding,
-                                resdepth[0],
-                                dropout_p,
-                                self.actresnet),
-            self.act
-        ) if resdepth[0] > 0 else modules.Pass()
-
-        self.gen_res0 = nn.Sequential(
-            # shape: [rw,8,8] -> [rw,8,8]
-            modules.ResNetBlock(self.reswidth,
-                                self.reswidth,
-                                5,
-                                1,
-                                padding_proc,
-                                self.nprocessing,
-                                dropout_p,
-                                self.actresnet),
-            self.act
-        ) if self.nprocessing > 0 else modules.Pass()
-
-        self.gen_mu = nn.Sequential(
-            # shape: [rw,8,8] -> [4,8,8]
-            modules.WnConv2d(self.reswidth,
-                             4 * self.xdim[0],
-                             self.kernel_size,
-                             1,
-                             padding,
-                             init_scale=0.1),
-            # shape: [4,8,8] -> [1,32,32]
-            modules.UnSqueeze2d(factor=2)
-        )
-        '''
-        # the scale parameter of the bottom (zi = 1) generative model is modelled unconditional
-        # self.gen_std = nn.Parameter(torch.Tensor(*self.xdim))
-        # nn.init.zeros_(self.gen_std)
 
     # function to set the model to compression mode
     def compress_mode(self, compress=True):
@@ -1796,9 +1546,23 @@ class SHVC_VAE(nn.Module):
         logrecon = torch.zeros((x.shape[0], x.shape[1]), device=x.device)
 
         # ***************************** autoregressive initial bits *****************************
-        init_save = self.p_x_given_ARx(x, self.s) # (B, C)
-        logrecon += init_save
-        init_save = torch.sum(init_save, dim=1)
+        # encode x_i ~ p(x_i|x_1:i-1), i = 12, ..., s+1
+        D_params = self.p_x_l_pre_x(x) # (B, 4C, 15, H/2, W/2)
+        # ***************************** get frequency mask *****************************
+        # mask = self.threshold_net(D_params)
+        # D_params_high = self.p_x_l_pre_x_high(x, mask) # (B, 4C, 15, H/2, W/2)
+        # ******************************************************************************
+        for i in range(x.size(1)-1, int(self.s), -1):
+            y = x[:, i,].unsqueeze(1) # (B, 1, H/2, W/2)
+            param = D_params[:, i,] # (B, 15, H/2, W/2)
+            # ***************************** get frequency mask *************************
+            # param_h = D_params_high[:, i,] # (B, 15, H/2, W/2)
+            # param = param_l[mask] + param_h[(1-mask)]
+            # **************************************************************************
+            # it should be (B, H, W, C) -> (B, C) in general, but C=1 in my case, so -> (B, )
+            logrecon[:,i] += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=(1,2,3))
+
+        init_save = torch.sum(logrecon, dim=1)
         x[:, int(self.s)+1:,] = 0
 
         for i in range(self.nz):
@@ -1813,16 +1577,17 @@ class SHVC_VAE(nn.Module):
             logenc[i] += logq
             if i == 0:
                 init_cost = torch.sum(logq, dim=1)
-                # print(f'init_save:\n{init_save}')
-                # print(f'init_cost:\n{init_cost}')
+            
             # ******************************** generative model *********************************
             # store the generative model loss
             if i == 0:
-                # # if bottom (zi = 1) generative model, evaluate loss using discretized Logistic distribution
-                # logp = torch.sum(random.discretized_logistic_logp(mu, scale, x), dim=(1,2,3))
-                # logrecon = logp
-                logrecon += self.p_x_given_ARx_z1((x, z_next), self.s) # (B, C)                
-                # print(f'logrecon:\n{logrecon}')
+                # encode x_i ~ p(x_i|x_1:i-1, z1), i = s, ..., 1
+                D_params = self.p_x_l_pre_x_z1((x, z_next)) # (B, 4C, 15, H/2, W/2)
+                for i in range(int(self.s), -1, -1):
+                    y = x[:, i,].unsqueeze(1) # (B, 1, H/2, W/2)
+                    param = D_params[:, i,] # (B, 15, H/2, W/2)
+                    # it should be (B, H, W, C) -> (B, C) in general, but C=1 in my case, so -> (B, )
+                    logrecon[:,i] += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=(1,2,3))         
             else:
                 # get the parameters of inference distribution i given z
                 mu, scale = self.generate(i)(given=z_next)
@@ -1832,8 +1597,16 @@ class SHVC_VAE(nn.Module):
             z = z_next
 
         # autoregressive factorization prior
-        # logp = torch.sum(random.logistic_logp(torch.zeros(1, device=x.device), torch.ones(1, device=x.device), z), dim=(2, 3))
-        logp = self.p_z(z, self.s)
+        # encode z ~ p(z_i|z_1:i-1)
+        ar_logp = torch.zeros((z.size(0), z.size(1))).to(z.device) # (B, num_total_channel)
+        D_params = self.p_z(z) # z3: (B, c, 2, h, w)
+        for i in range(z.size(1)-1, -1, -1):
+            y = z[:, i,].unsqueeze(1) # z3: (B, 1, h, w)
+            param = D_params[:, i,] # (B, 2, h, w)
+            mu, logsd = torch.split(param, 1, dim=1) # (B, 1, h, w)
+            scale = 0.1 + 0.9 * modules.softplus(torch.exp(logsd) + np.log(np.exp(1.) - 1.))
+            ar_logp[:,i] += torch.sum(random.logistic_logp(mu, scale, y), dim=(1,2,3)) # (B, 1, h, w) -> (B, )
+
         logdec[self.nz - 1] += logp
 
         # convert from "nats" to bits
