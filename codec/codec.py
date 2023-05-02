@@ -1,8 +1,10 @@
 from tqdm import tqdm
+import numpy as np
 import pickle
+import torch
 import os
 
-from .bbc_scheme import *
+from .bbc_scheme import BitSwap, BBC
 from utils.torch.rand import ImageBins
 
 '''
@@ -51,7 +53,7 @@ class Codec:
 
         # metrics for the results
         nets  = np.zeros((self.num_data, ), dtype=np.float64)
-        elbos = np.zeros((self.num_data, ), dtype=np.float64)
+        # elbos = np.zeros((self.num_data, ), dtype=np.float64)
         cma   = np.zeros((self.num_data, ), dtype=np.float64)
         total = np.zeros((self.num_data, ), dtype=np.float64)
 
@@ -67,10 +69,10 @@ class Codec:
             x = x.to(self.cf.device).view(self.total_xdim)
 
             # calculate ELBO
-            with torch.no_grad():
-                self.model.compress_mode(False)
-                elbo, _ = self.model.loss(x.view((-1,) + self.model.xdim), 'test')
-                self.model.compress_mode(True)
+            # with torch.no_grad():
+            #     self.model.compress_mode(False)
+            #     elbo, _ = self.model.loss(x.view((-1,) + self.model.xdim), 'test')
+            #     self.model.compress_mode(True)
 
             if self.cf.bbc_scheme == 'bitswap':
                 scheme = BitSwap(self.cf, self.model, self.state, self.x_bin, self.z_bin)
@@ -85,12 +87,12 @@ class Codec:
 
             # logging
             nets[i]  = (total_added_bits / self.total_xdim) - nets[:i].sum()
-            elbos[i] = elbo.item() / self.total_xdim
+            # elbos[i] = elbo.item() / self.total_xdim
             cma[i]   = totalbits / (self.total_xdim * (i + 1))
             total[i] = totalbits
 
             iterator.set_postfix_str(s=f"N:{nets[:i+1].mean():.2f}±{nets[:i+1].std():.2f}, " + 
-                                       f"D:{nets[:i+1].mean()-elbos[:i+1].mean():.4f}, " +
+                                    #    f"D:{nets[:i+1].mean()-elbos[:i+1].mean():.4f}, " +
                                        f"C: {cma[:i+1].mean():.2f}, " +
                                        f"T: {totalbits:.0f}", refresh=False)
 
@@ -100,9 +102,9 @@ class Codec:
         with open(os.path.join(self.cf.state_dir, f"{self.cf.model_name}.pt"), "wb") as fp:
             pickle.dump(self.state, fp)
         
-        print(f"N:{nets.mean():.4f}±{nets.std():.2f}, " +
-              f"E:{elbos.mean():.4f}±{elbos.std():.2f}, " +
-              f"D:{nets.mean() - elbos.mean():.6f}")
+        print(f"N:{nets.mean():.4f}±{nets.std():.2f}, ")# +
+            #   f"E:{elbos.mean():.4f}±{elbos.std():.2f}, " +
+            #   f"D:{nets.mean() - elbos.mean():.6f}")
         
         print('compression complete')
         return
