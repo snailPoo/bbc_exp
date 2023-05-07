@@ -5,16 +5,14 @@ from torch.utils.data import DataLoader
 import craystack as cs
 import numpy as np
 import time
-import torch
 import os
 import pickle
 
 from config import *
-from codec.bbc_scheme import ResNetVAE, custom_ResNetVAE
 from utils.common import load_data, load_model, load_scheme, same_seed
 
 
-cf = Config_bbans() # Config_bbans # Config_hilloc
+cf = Config_shvc() # Config_bbans # Config_hilloc # Config_shvc
 cf_compress = cf.compress_hparam
 cf_model = cf.model_hparam
 
@@ -26,7 +24,7 @@ print(f"Model:{cf.model_name}; Dataset:{cf.dataset}")
 _, test_set = load_data(cf.dataset, cf.model_name, load_train=False)
 cf_model.xdim = test_set[0][0].shape
 
-num_images = len(test_set)
+num_images = 1#len(test_set)
 batch_size = cf_compress.batch_size
 n_batches = num_images // batch_size
 
@@ -54,10 +52,9 @@ model.eval().to(cf.device)
 # ******* codec *******
 scheme = load_scheme(cf.model_name, cf_compress, model)
 
-codec_shape = (batch_size, *cf_model.xdim)
-print(f"Creating codec for shape {codec_shape}")
-latent_shape = (codec_shape[0], cf_model.z_size, 
-                codec_shape[2] // 2, codec_shape[3] // 2)
+codec_shape = (batch_size, *model.xdim)
+latent_shape = (batch_size, *model.zdim)
+print(f"Creating codec for shape x:{codec_shape} z:{latent_shape}")
 latent_dims = np.prod(latent_shape)
 
 def vae_view(head):

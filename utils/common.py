@@ -109,7 +109,7 @@ def load_model(model_name, model_pt, hparam, lr, decay):
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=decay)
 
     elif model_name == 'shvc':
-        model = SHVC_VAE(hparam) #Simple_SHVC(hparam)
+        model = My_SHVC_VAE(hparam)#SHVC_VAE(hparam) #Simple_SHVC(hparam)
         optimizer = optim.Adam(model.parameters(), lr=lr)
         scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=decay, last_epoch=-1, verbose=True)
 
@@ -123,9 +123,11 @@ def load_model(model_name, model_pt, hparam, lr, decay):
 
     return model, optimizer, scheduler
 
-from codec.bbc_scheme import VAE, ResNetVAE
+from codec.bbc_scheme import VAE, ResNetVAE, SHVC_BitSwap
 def load_scheme(model_name, cf, model):
     if model_name == 'bbans':
         return VAE(cf, model)
     elif model_name == 'hilloc':
         return ResNetVAE(cf, model)
+    elif model_name == 'shvc':
+        return SHVC_BitSwap(cf, model)

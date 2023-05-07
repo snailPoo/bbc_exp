@@ -126,6 +126,22 @@ def discretized_mix_logistic_logp(x, l):
     return log_sum_exp(log_probs) # (B, H, W, C)
 
 
+# def mixture_discretized_logistic_cdf(x, l):
+#     x = x.permute(0, 2, 3, 1) # x:(B, C, H, W) -> (B, H, W, C)
+#     l = l.permute(0, 2, 3, 1) # l:(B, C * (3 * nr_mix), H, W) -> (B, H, W, C * (3 * nr_mix))
+#     xs = list(x.size()) # true image (i.e. labels) to regress to, e.g. (B,32,32,3)
+#     ls = list(l.size()) # predicted distribution, e.g. (B,32,32,100)    nr_mix = int((ls[-1]/xs[-1]) / 3)
+#     nr_mix = int((ls[-1]/xs[-1]) / 3)
+#     l = l.reshape(xs + [3 * nr_mix]) # (B, H, W, C, (3 * nr_mix))
+#     logit_probs, means, log_scales = torch.split(l, nr_mix, dim=-1) # (B, H, W, C, nr_mix)
+#     x = x.unsqueeze(-1).repeat(1, 1, 1, 1, nr_mix)
+#     centered_x = x - means
+#     inv_stdv = torch.exp(-log_scales)
+#     plus_in = inv_stdv * (centered_x + 1./255.)
+#     cdf_plus = torch.sigmoid(plus_in)
+#     log_probs = torch.log(cdf_plus) + log_prob_from_logits(logit_probs)
+#     return log_sum_exp(log_probs)
+
 # def sample_from_discretized_mix_logistic(l, nr_mix):
 #     ls = l.shape
 #     xs = ls[:-1] + (3,)

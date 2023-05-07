@@ -216,103 +216,6 @@ class IAFLayer(nn.Module):
 
         return input + 0.1 * h, kl_obj, kl_cost
 
-'''
-class IAFLayer(nn.Module):
-    def __init__(self, xdim, h_size, z_channel):
-        super().__init__()
-        self.z_channel = z_channel
-        self.h_size = h_size # Size of resnet block.
-
-        # posterior is bidirectional - i.e. has a deterministic upper pass but top down sampling.
-        self.bidirectional = True # True for bidirectional, False for bottom-up inference
-        # self.enable_iaf = False # True for IAF, False for Gaussian posterior
-        self.kl_min = torch.tensor(0.1) # Number of "free bits/nats".
-
-        self.act = nn.ELU()
-
-        self.in_dim = xdim[0]
-        self.up_split_conv2d   = WnConv2d(in_dim = self.h_size, 
-                                          out_dim = 2 * self.z_channel + 2 * self.h_size, 
-                                          kernel_size = 3, 
-                                          stride = 1, 
-                                          padding = 1)
-        
-        self.up_merge_conv2d   = WnConv2d(in_dim = self.h_size, 
-                                          out_dim = self.h_size, 
-                                          kernel_size = 3, 
-                                          stride = 1, 
-                                          padding = 1)
-        
-        self.down_split_conv2d = WnConv2d(in_dim = self.h_size, 
-                                          out_dim = 4 * self.z_channel + 2 * self.h_size,
-                                          kernel_size = 3, 
-                                          stride = 1, 
-                                          padding = 1)
-        
-        self.down_merge_conv2d = WnConv2d(in_dim = self.h_size + self.z_channel, 
-                                          out_dim = self.h_size, 
-                                          kernel_size = 3, 
-                                          stride = 1, 
-                                          padding = 1)
-
-
-    def up(self, input, **_):
-        self.qz_mean, self.qz_logsd, self.up_context, h = self.up_split(input)
-        return self.up_merge(h, input)
-
-    def up_split(self, input):
-        x = self.act(input)
-        x = self.up_split_conv2d(x)
-        return torch.split(x, [self.z_channel] * 2 + [self.h_size] * 2, dim=1)
-
-    def up_merge(self, h, input):
-        h = nn.ELU()(h)
-        h = self.up_merge_conv2d(h)
-        return input + 0.1 * h
-
-    def down(self, input):
-        h_det, posterior, prior, ar_context = self.down_split(
-            input, self.qz_mean, self.qz_logsd, self.up_context)
-
-        z = posterior.sample
-        logqs = posterior.logps(z)
-
-        logps = prior.logps(z)
-
-        kl = logqs - logps
-
-        # free bits
-        kl_obj = kl.sum(dim=(-2, -1)).mean(dim=0, keepdim=True)
-        kl_obj = kl_obj.clamp(min=self.kl_min.to(kl_obj.device))
-        kl_obj = kl_obj.expand(kl.size(0), -1)
-        kl_obj = kl_obj.sum(dim=1)
-
-        # sum over all the dimensions, but the batch
-        kl = kl.sum(dim=(1,2,3))
-
-
-        return self.down_merge(h_det, input, z), kl, kl_obj 
-
-    def down_split(self, input, qz_mean, qz_logsd, up_context):
-        x = self.act(input)
-        x = self.down_split_conv2d(x)
-
-        pz_mean, pz_logsd, rz_mean, rz_logsd, down_context, h_det = torch.split(x, [self.z_channel] * 4 + [self.h_size] * 2, dim=1)
-        
-        prior = DiagonalGaussian(pz_mean, 2 * pz_logsd)
-        posterior = DiagonalGaussian(
-            qz_mean + (rz_mean if self.bidirectional else 0),
-            2 * (qz_logsd + (rz_logsd if self.bidirectional else 0)))
-        
-        return h_det, posterior, prior, up_context + down_context
-
-    def down_merge(self, h_det, input, z):
-        h = torch.cat([z, h_det], dim=1)
-        h = self.act(h)
-        h = self.down_merge_conv2d(h)
-        return input + 0.1 * h
-'''
-
 
 class SimpleNet(nn.Module):
     def __init__(self, in_dim, out_dim, up_down=None):
@@ -378,6 +281,20 @@ class Conv1x1Net(nn.Module):
 
         return x
 
+def lossless_upsample(input, factor=2):
+    if factor == 1:
+        return input
+    B, C, H_, W_ = input.shape
+    assert C % (factor*factor) == 0, "{}".format((C))
+    C_, H, W = C // (factor*factor), H_ * factor, W_ * factor
+    x = input.reshape(B, factor * factor, C_, H_ , W_)
+    x = torch.swapaxes(x, 1, 2)
+    x = x.reshape(B, C_, H_, W_, factor, factor)
+    x = x.permute(0, 1, 4, 2, 5, 3).contiguous()
+    x = x.reshape(B, C_, H, W)
+
+    return x
+
 # x with shape (B, C, H, W) lossless downsampled to (B, 4*C, H/2, W/2)
 def lossless_downsample(input, factor=2):
     if factor == 1:
@@ -389,6 +306,33 @@ def lossless_downsample(input, factor=2):
     x = x.permute(0, 1, 3, 5, 2, 4).contiguous()
     x = x.view(B, C, factor * factor, H_, W_)
     x = torch.swapaxes(x, 1, 2).reshape((B, -1, H_, W_))
+
+    return x
+
+def np_lossless_upsample(input, factor=2):
+    if factor == 1:
+        return input
+    B, C, H_, W_ = input.shape
+    assert C % (factor*factor) == 0, "{}".format((C))
+    C_, H, W = C // (factor*factor), H_ * factor, W_ * factor
+    x = input.reshape(B, factor * factor, C_, H_ , W_)
+    x = np.swapaxes(x, 1, 2)
+    x = x.reshape(B, C_, H_, W_, factor, factor)
+    x = np.transpose(x, (0, 1, 4, 2, 5, 3)).copy()
+    x = x.reshape(B, C_, H, W)
+
+    return x
+
+def np_lossless_downsample(input, factor=2):
+    if factor == 1:
+        return input
+    B, C, H, W = input.shape
+    assert H % factor == 0 and W % factor == 0, "{}".format((H, W))
+    H_, W_ = H // factor, W // factor
+    x = input.reshape(B, C, H_, factor, W_, factor)
+    x = np.transpose(x, (0, 1, 3, 5, 2, 4)).copy()
+    x = x.reshape(B, C, factor * factor, H_, W_)
+    x = np.swapaxes(x, 1, 2).reshape((B, -1, H_, W_))
 
     return x
 

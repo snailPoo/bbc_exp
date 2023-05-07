@@ -148,27 +148,6 @@ from craystack.bb_ans import BBANS
 import torch.nn.functional as F
 from craystack.codecs import substack, Uniform, \
     std_gaussian_centres, DiagGaussian_StdBins
-
-def tensor_to_ndarray(tensor):
-    if type(tensor) is tuple:
-        return tuple(tensor_to_ndarray(t) for t in tensor)
-    else:
-        return tensor.detach().cpu().numpy()
-
-def ndarray_to_tensor(arr):
-    if type(arr) is tuple:
-        return tuple(ndarray_to_tensor(a) for a in arr)
-    elif type(arr) is torch.Tensor:
-        return arr
-    else:
-        return torch.from_numpy(np.float32(arr))
-    
-def torch_fun_to_numpy_fun(fun):
-    def numpy_fun(*args, **kwargs):
-        torch_args = ndarray_to_tensor(args)
-        return tensor_to_ndarray(fun(*torch_args, **kwargs))
-    return numpy_fun
-
 from utils.distributions import generate_beta_binomial_probs
 
 def VAE(config, model):
@@ -193,7 +172,8 @@ def VAE(config, model):
     @torch.no_grad()
     def likelihood(latent_idxs):
         z = prior_inv_cdf[latent_idxs]
-        x = model.decode(torch.from_numpy(z.astype(np.float32)).to(device))
+        x_alpha, x_beta = model.decode(torch.from_numpy(z.astype(np.float32)).to(device))
+        x = (x_alpha.view((config.batch_size,)+model.xdim), x_beta.view((config.batch_size,)+model.xdim))
         obs_codec = lambda x: cs.Categorical(generate_beta_binomial_probs(*x, torch.tensor(255)), obs_precision)
         return substack(obs_codec(x), x_view)
     
@@ -409,144 +389,207 @@ def ResNetVAE(config, model):
 
     return BBANS(cs.Codec(prior_push, prior_pop), likelihood, posterior)
 
-def custom_ResNetVAE(config, model):
-    """
-    Codec for a ResNetVAE.
-    Assume that the posterior is bidirectional -
-    i.e. has a deterministic upper pass but top down sampling.
-    Further assume that all latent conditionals are factorised Gaussians,
-    both in the generative network p(z_n|z_{n-1})
-    and in the inference network q(z_n|x, z_{n-1})
 
-    Assume that everything is ordered bottom up
-    """
-    prior_prec = config.prior_precision
-    latent_prec = config.q_precision
-    obs_precision = config.obs_precision
+from utils.torch.modules import np_lossless_downsample, lossless_upsample
+
+def SHVC_BitSwap(config, model):
 
     z_view = lambda head: head[0]
-    x_view = lambda head: head[1]
+    x_view = lambda head: head[1] # one channel of downsampled image
 
-    prior = substack(Uniform(prior_prec), z_view)
-    prior_inv_cdf = std_gaussian_centres(prior_prec)
+    data_prec = config.data_prec
+    latent_bin = config.latent_bin
+    latent_prec = config.latent_prec
 
     device = config.device
     
+    z_inv_cdf = std_gaussian_centres(latent_bin)
+
     @torch.no_grad()
     def encoding(state, data):
-        # assumes input is in [-0.5, 0.5] 
+        data = np_lossless_downsample(data)
         x = torch.from_numpy(data.astype(np.float32)).to(device)
-        x = torch.clamp((x + 0.5) / 256.0, 0.0, 1.0) - 0.5
-        h = model.first_conv(x)
-        # run deterministic upper-pass to get qz_mean and qz_std (bottom-up)
-        for layer in model.layers:
-            for sub_layer in layer:
-                h = sub_layer.up(h)
+        x = (x - 127.5) / 127.5
 
-        latents = []
-        # input initalization
-        input = model.h.view(1, -1, 1, 1).expand((config.batch_size, 
-                                                  model.h_size, 
-                                                  model.xdim[1] // 2, 
-                                                  model.xdim[2] // 2)).to(device)
-
-        for layer in reversed(model.layers):
-            for zl in reversed(layer):
-                # down pass
-                h = zl.down_conv_a(F.elu(input))
-                pz_mean, pz_logsd, rz_mean, rz_logsd, _, h_det = h.split([zl.z_size] * 4 + [zl.h_size] * 2, 1)
-                # ***************************************** posterior pop z *****************************************
-                prior_mean = pz_mean
-                prior_stdd = torch.exp(pz_logsd)
-                post_mean = zl.qz_mean + rz_mean
-                post_stdd = torch.exp(zl.qz_logsd + rz_logsd)
-                posterior = substack(cs.DiagGaussian_GaussianBins(post_mean.cpu().numpy(), post_stdd.cpu().numpy(),
-                                                                  prior_mean.cpu().numpy(), prior_stdd.cpu().numpy(),
-                                                                  latent_prec, prior_prec),
-                                     z_view)
-                # pop top-down z_L -> z_1
-                state, latent_idx = posterior.pop(state)
-                latent_val = prior_mean + torch.from_numpy(prior_inv_cdf[latent_idx]).to(device) * prior_stdd
-                latents.insert(0, latent_idx)
-                # ***************************************************************************************************
-                h = torch.cat((latent_val, h_det), 1).float()
-                h = zl.down_conv_b(F.elu(h))
-                input = input + 0.1 * h
+        # ************************************************************************************************
+        D_params = model.p_x_l_pre_x(x)
+        for i in range(x.size(1)-1, int(model.s), -1):
+            y = data[:, i,]#np.expand_dims(data[:, i,], axis=1) # (B, 1, H/2, W/2)
+            param = D_params[:, i,] # (B, 15, H/2, W/2)
+            logit_probs, means, log_scales = torch.split(param, 5, dim=1)
+            likelihood = substack(
+                cs.LogisticMixture_UnifBins(means.cpu().numpy(), 
+                                            log_scales.cpu().numpy(), 
+                                            logit_probs.cpu().numpy(), 
+                                            data_prec, bin_prec=8, 
+                                            bin_lb=-0.5, bin_ub=0.5), 
+                x_view)
+            # print(f'autoregressive push channel {i}')
+            state, = likelihood.push(state, y)
         
-        x_mu = model.last_conv(F.elu(input))
-        x_mu = x_mu.clamp(min = -0.5 + 1. / 512., max = 0.5 - 1. / 512.)
-        # *********************** likelihood push x ***********************
-        obs_codec = cs.Logistic_UnifBins(x_mu.cpu().numpy(), 
-                                         model.dec_log_stdv.cpu().numpy(),
-                                         obs_precision, bin_prec=8,
-                                         bin_lb=-0.5, bin_ub=0.5)
-        likelihood = substack(obs_codec, x_view)
-        state, = likelihood.push(state, data)
-        # *****************************************************************
-        # *********************** prior push z **********************
-        for latent_idx in latents: # push bottom-up z_1 -> z_L
-            state, = prior.push(state, latent_idx)
-        # ***********************************************************
-        return state, 
+        x[:, int(model.s)+1:,] = 0
+        z = None
+        # ************************************************************************************************
+        for zi in range(model.nz):
+            mu, logsd = model.infer(zi)(given=x if zi == 0 else z)
+            scale = torch.exp(logsd)
+            posterior = substack(
+                # cs.Logistic_UnifBins(mu.cpu().numpy(), 
+                #                      torch.log(scale).cpu().numpy(), 
+                #                      latent_prec, latent_bin, 
+                #                      bin_lb=-np.inf, bin_ub=np.inf),
+                cs.DiagGaussian_StdBins(mu.cpu().numpy(), 
+                                        scale.cpu().numpy(), 
+                                        latent_prec, latent_bin),
+                z_view)
+            # state, z_next = posterior.pop(state)
+            # print(f'posterior pop z{zi}')
+            state, z_next_idx = posterior.pop(state)
+            z_next = mu + torch.from_numpy(z_inv_cdf[z_next_idx].astype(np.float32)).to(device) * scale
 
+            if zi == 0:
+                # ************************************************************************************************
+                D_params = model.p_x_l_pre_x_z1((x, z_next)) # (B, 4C, 15, H/2, W/2)
+                for i in range(int(model.s), -1, -1):
+                    y = data[:, i,]#np.expand_dims(data[:, i,], axis=1) # (B, 1, H/2, W/2)
+                    param = D_params[:, i,] # (B, 15, H/2, W/2)
+                    logit_probs, means, log_scales = torch.split(param, 5, dim=1)
+                    if i == 0:
+                        print(means)
+                        # print(log_scales)
+                    likelihood = substack(
+                        cs.LogisticMixture_UnifBins(means.cpu().numpy(), 
+                                                    log_scales.cpu().numpy(), 
+                                                    logit_probs.cpu().numpy(), 
+                                                    data_prec, bin_prec=8, 
+                                                    bin_lb=-0.5, bin_ub=0.5), 
+                        x_view)
+                    # print(f'autoregressive push channel {i}')
+                    state, = likelihood.push(state, y)
+                # ************************************************************************************************     
+            else:
+                mu, logsd = model.generate(zi)(given=z_next)
+                prior = substack(
+                    # cs.Logistic_UnifBins(mu.cpu().numpy(), 
+                    #                      torch.log(scale).cpu().numpy(), 
+                    #                      latent_prec, latent_bin, 
+                    #                      bin_lb=-np.inf, bin_ub=np.inf),
+                    cs.DiagGaussian_StdBins(mu.cpu().numpy(), 
+                                            torch.exp(logsd).cpu().numpy(), 
+                                            latent_prec, latent_bin), 
+                    z_view)
+                # print(f'prior push z{zi-1}')
+                # state, = prior.push(state, z)
+                state, = prior.push(state, z_idx)
+
+            z = z_next
+            z_idx = z_next_idx
+
+        # encode prior
+        D_params = model.p_z(z) # z3: (B, c, 2, h, w)
+        for i in range(z.size(1)-1, -1, -1):
+            y = z_idx[:, i,] # z3: (B, 1, h, w)
+            param = D_params[:, i,] # (B, 2, h, w)
+            mu, logsd = torch.split(param, 1, dim=1) # (B, 1, h, w)
+            mu = mu.squeeze(1).cpu().numpy()
+            scale = torch.exp(logsd.squeeze(1)).cpu().numpy()
+            prior = substack(
+                # cs.Logistic_UnifBins(mu.cpu().numpy(), 
+                #                      logsd.cpu().numpy(), 
+                #                      latent_prec, latent_bin, 
+                #                      bin_lb=-np.inf, bin_ub=np.inf),
+                cs.DiagGaussian_StdBins(mu, scale, latent_prec, latent_bin), 
+                x_view) # z dim (H & W) the same as x in my case
+            state, = prior.push(state, y)
+            # print(f'autoregressive push z{model.nz-1} channel {i}')
+
+        return state,
+    
     @torch.no_grad()
     def decoding(state):
-        # run the down pass to top-down get params and latent vals
-        latents = []
-        post_params = []
+        z_next_idx = np.zeros((config.batch_size, *model.zdim), dtype=int)
+        z_next = torch.zeros((config.batch_size, *model.zdim)).to(device)
+        x = torch.zeros((config.batch_size, model.xC, *model.xdim)).to(device)
+
+        # autoregressively decode last latent variable
+        hidden = None
+        lstm_input = torch.zeros((config.batch_size, 1, 1, model.zdim[-2], model.zdim[-1])).to(device) # z3: (B, c=1, 1, h, w)
+        for i in range(0, z_next.size(1)):
+            param, hidden = model.p_z.ar_model(lstm_input, hidden=hidden) # z3: (B, c=1, 2, h, w)
+            mu, logsd = torch.split(param.squeeze(1), 1, dim=1) # (B, 1, h, w)
+            mu = mu.squeeze(1) # (B, h, w)
+            scale = torch.exp(logsd).squeeze(1)
+            prior = substack(
+                cs.DiagGaussian_StdBins(mu.cpu().numpy(), 
+                                        scale.cpu().numpy(), 
+                                        latent_prec, latent_bin), 
+                x_view)
+            state, z_C_idx = prior.pop(state)
+            z_next_idx[:, i,] = z_C_idx
+            z_next[:, i,] = mu + torch.from_numpy(z_inv_cdf[z_C_idx].astype(np.float32)).to(device) * scale # (B, h, w)
+            lstm_input = z_next[:, i,].unsqueeze(1).unsqueeze(1)
         
-        # input initalization
-        input = model.h.view(1, -1, 1, 1).expand((config.batch_size, 
-                                                  model.h_size, 
-                                                  model.xdim[1] // 2, 
-                                                  model.xdim[2] // 2)).to(device)
+        for zi in reversed(range(model.nz)):
+            if zi == 0:
+                hidden = None
+                lstm_input = torch.zeros(config.batch_size, 1, 1, model.xdim[-2], model.xdim[-1]).to(device) # (B, c=1, 1, H/2, W/2)
+                z1_embd = model.p_x_l_pre_x_z1.z1_cond_network(z_next).unsqueeze(1) # (B, c=1, 4, H/2, W/2)
+                for i in range(0, int(model.s)+1):
+                    lstm_input = torch.cat([lstm_input, z1_embd], dim=2) # (B, c=1, 5, H/2, W/2)
+                    param, hidden = model.p_x_l_pre_x_z1.ar_model(lstm_input, hidden=hidden) # (B, c=1, 15, H/2, W/2)
+                    logit_probs, means, log_scales = torch.split(param.squeeze(1), 5, dim=1) # (B, 5, H/2, W/2)
+                    if i == 0:
+                        print(means)
+                        # print(log_scales)
+                    likelihood = substack(
+                        cs.LogisticMixture_UnifBins(means.cpu().numpy(), 
+                                                    log_scales.cpu().numpy(), 
+                                                    logit_probs.cpu().numpy(), 
+                                                    data_prec, bin_prec=8, 
+                                                    bin_lb=-0.5, bin_ub=0.5), 
+                        x_view)
+                    # print(f'autoregressive push channel {i}')
+                    state, x_C = likelihood.pop(state)
+                    x[:, i,] = torch.from_numpy(x_C).to(device)
+                    lstm_input = x[:, i,].unsqueeze(1).unsqueeze(1)
+            else:
+                mu, logsd = model.generate(zi)(given=z_next)
+                scale = torch.exp(logsd)
+                prior = substack(
+                    cs.DiagGaussian_StdBins(mu.cpu().numpy(), 
+                                            scale.cpu().numpy(), 
+                                            latent_prec, latent_bin), 
+                    z_view)
+                state, z_idx = prior.pop(state)
+                z = mu + torch.from_numpy(z_inv_cdf[z_idx].astype(np.float32)).to(device) * scale
+                
+            mu, logsd = model.infer(zi)(given=x if zi == 0 else z)
+            posterior = substack(
+                cs.DiagGaussian_StdBins(mu.cpu().numpy(), 
+                                        torch.exp(logsd).cpu().numpy(), 
+                                        latent_prec, latent_bin),
+                z_view)
+            state, = posterior.push(state, z_next_idx)
 
-        for layer in reversed(model.layers):
-            for zl in reversed(layer):
-                h = zl.down_conv_a(F.elu(input))
-                pz_mean, pz_logsd, rz_mean, rz_logsd, _, h_det = h.split([zl.z_size] * 4 + [zl.h_size] * 2, 1)
-                # ***************************************** prior pop z *****************************************
-                prior_mean = pz_mean
-                prior_stdd = torch.exp(pz_logsd)
-                # pop top-down z_L -> z_1
-                state, latent_idx = prior.pop(state)
-                latent_val = prior_mean + torch.from_numpy(prior_inv_cdf[latent_idx]).to(device) * prior_stdd
-                latents.insert(0, (latent_idx, (prior_mean, prior_stdd)))
-                post_params.insert(0, (rz_mean, rz_logsd))
-                # ***********************************************************************************************
-                h = torch.cat((latent_val, h_det), 1).float()
-                h = zl.down_conv_b(F.elu(h))
-                input = input + 0.1 * h
+            z_next = z
+            z_next_idx = z_idx
 
-        x_mu = model.last_conv(F.elu(input))
-        x_mu = x_mu.clamp(min = -0.5 + 1. / 512., max = 0.5 - 1. / 512.)
-        # *********************** likelihood pop x ***********************
-        obs_codec = cs.Logistic_UnifBins(x_mu.cpu().numpy(), 
-                                         model.dec_log_stdv.cpu().numpy(),
-                                         obs_precision, bin_prec=8,
-                                         bin_lb=-0.5, bin_ub=0.5)
-        likelihood = substack(obs_codec, x_view)
-        state, data = likelihood.pop(state)
-        # ****************************************************************
-        x = torch.from_numpy(data.astype(np.float32)).to(device)
-        x = torch.clamp((x + 0.5) / 256.0, 0.0, 1.0) - 0.5
-        h = model.first_conv(x)
-        # run deterministic upper-pass to get qz_mean and qz_std (bottom-up)
-        for layer in model.layers:
-            for zl, latent, post_param in zip(layer, latents, post_params):
-                h = zl.up(h)
-                # *************************************** posterior push z ***************************************
-                latent_idx, (prior_mean, prior_stdd) = latent
-                rz_mean, rz_logsd = post_param
-                post_mean = zl.qz_mean + rz_mean
-                post_stdd = torch.exp(zl.qz_logsd + rz_logsd)
-                posterior = substack(cs.DiagGaussian_GaussianBins(post_mean.cpu().numpy(), post_stdd.cpu().numpy(),
-                                                                  prior_mean.cpu().numpy(), prior_stdd.cpu().numpy(),
-                                                                  latent_prec, prior_prec),
-                                     z_view)
-                # push bottom up z_1 -> z_L
-                state, = posterior.push(state, latent_idx)
-                # ************************************************************************************************
-        return state, data
+        for i in range(int(model.s)+1, model.xC):
+            param, hidden = model.p_x_l_pre_x.ar_model(lstm_input, hidden=hidden) # (B, c=1, 15, H/2, W/2)
+            logit_probs, means, log_scales = torch.split(param.squeeze(1), 5, dim=1) # (B, 5, H/2, W/2)
+            likelihood = substack(
+                cs.LogisticMixture_UnifBins(means.cpu().numpy(), 
+                                            log_scales.cpu().numpy(), 
+                                            logit_probs.cpu().numpy(), 
+                                            data_prec, bin_prec=8, 
+                                            bin_lb=-0.5, bin_ub=0.5), 
+                x_view)
+            state, x_C = likelihood.pop(state)
+            x[:, i,] = torch.from_numpy(x_C).to(device)
+            lstm_input = x[:, i,].unsqueeze(1).unsqueeze(1)
 
+        x = lossless_upsample(x).cpu().numpy().astype(np.uint64)
+
+        return state, x
+    
     return cs.Codec(encoding, decoding)

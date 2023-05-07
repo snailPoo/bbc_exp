@@ -44,7 +44,7 @@ if __name__ == '__main__':
     state[-1] = state[-1] << 32
     # *********************
 
-    num_images = 1000#test_loader.__len__()
+    num_images = test_loader.__len__()
     codec = Codec(cf, model, (train_loader, test_loader), state, num_images)
 
     encode_t0 = time.time()
