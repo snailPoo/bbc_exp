@@ -53,8 +53,8 @@ class Config_bitswap(object):
         self.log_interval = 3000  # interval for logging/printing of relevant values
         self.eval_freq = 5
 
-        self.device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
-        self.dataset = 'mnist'#'cifar'#'mnist'#'imagenet'#'imagenet_full'
+        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        self.dataset = 'imagenet_full'#'cifar'#'mnist'#'imagenet'#'imagenet_full'
 
         self.warmup = False
         self.epochs = 1400
@@ -92,7 +92,7 @@ class Config_bitswap(object):
         self.model_hparam = Model_hparam(self.dataset)
 
         self.model_dir = f'model/params/{self.dataset}'
-        self.model_pt = os.path.join(self.model_dir, f"{self.model_name}_best.pt")
+        self.model_pt = "./model/params/bitswap_official_ckpt/imagenet/nz4"#os.path.join(self.model_dir, f"{self.model_name}_best.pt")
         self.log_dir = f"model/log/{self.dataset}/{self.model_name}"
 
         # used in compression stage
@@ -169,14 +169,14 @@ class Config_shvc(object):
         self.log_interval = 500
         self.eval_freq = 1
 
-        self.device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
-        self.dataset = 'cifar'#'cifar'#'mnist'#'imagenet'#'imagenet_full'
+        self.device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+        self.dataset = 'mnist'#'cifar'#'mnist'#'imagenet'#'imagenet_full'
 
         self.warmup = True
         self.epochs = 1000
-        self.lr = 9e-4#5e-4
+        self.lr = 2e-3#5e-4
         self.decay = 0.999#0.9961
-        self.batch_size = 128
+        self.batch_size = 64
 
         self.model_name = "shvc"
         self.bbc_scheme = 'bitswap'

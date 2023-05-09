@@ -800,7 +800,7 @@ class Channel_wise_AR(nn.Module):
 
         if z1_cond: # z1 channel fixed 32
             self.z1_cond_network = nn.Sequential(
-                nn.Conv2d(32, 16, 5, stride=1, padding=2), # z1 dim = x dim
+                nn.Conv2d(32, 16, 3, stride=1, padding=1), # z1 dim = x dim
                 # nn.ConvTranspose2d(32, 32, 4, stride=2, padding=1), # z1 dim = x dim / 2
                 nn.ReLU(), 
                 nn.Conv2d(16, 4, 5, stride=1, padding=2))
@@ -1629,10 +1629,6 @@ class My_SHVC_VAE(nn.Module):
             nblock[i] += 1
             i += 1
 
-        # reduce initial variance of distributions corresponding
-        # to latent layers if latent nz increases
-        scale = 1.0 / (self.nz ** 0.5)
-
         # activations
         self.softplus = nn.Softplus()
         self.sigmoid = nn.Sigmoid()
@@ -1804,11 +1800,15 @@ class My_SHVC_VAE(nn.Module):
         for i in range(self.nz):
             # ********************************* inference model *********************************
             mu, logsd = self.infer(i)(given=x if i == 0 else z) #scale
-            # z_next = random.sample_from_logistic(mu, scale, mu.shape, device=mu.device)
-            # logq = torch.sum(random.logistic_logp(mu, scale, z_next), dim=(2, 3))
-            posterior = DiagonalGaussian(mu, 2 * logsd)
-            z_next = posterior.sample
-            logq = torch.sum(posterior.logps(z_next), dim=(2, 3))
+            # ------------------------ logistic ------------------------
+            scale = torch.exp(logsd)
+            z_next = random.sample_from_logistic(mu, scale, mu.shape, device=mu.device)
+            logq = torch.sum(random.logistic_logp(mu, scale, z_next), dim=(2, 3))
+            # ------------------------ gaussian ------------------------
+            # posterior = DiagonalGaussian(mu, 2 * logsd)
+            # z_next = posterior.sample
+            # logq = torch.sum(posterior.logps(z_next), dim=(2, 3))
+            # ----------------------------------------------------------
 
             logenc[i] += logq
             if i == 0:
@@ -1826,9 +1826,13 @@ class My_SHVC_VAE(nn.Module):
             else:
                 # get the parameters of inference distribution i given z
                 mu, logsd = self.generate(i)(given=z_next) #scale
-                # logp = torch.sum(random.logistic_logp(mu, scale, z), dim=(2, 3))
-                prior = DiagonalGaussian(mu, 2 * logsd)
-                logp = torch.sum(prior.logps(z), dim=(2, 3))
+                # ------------------------ logistic ------------------------
+                scale = torch.exp(logsd)
+                logp = torch.sum(random.logistic_logp(mu, scale, z), dim=(2, 3))
+                # ------------------------ gaussian ------------------------
+                # prior = DiagonalGaussian(mu, 2 * logsd)
+                # logp = torch.sum(prior.logps(z), dim=(2, 3))
+                # ----------------------------------------------------------
                 
                 logdec[i - 1] += logp
 
@@ -1842,16 +1846,19 @@ class My_SHVC_VAE(nn.Module):
             y = z[:, i,].unsqueeze(1) # z3: (B, 1, h, w)
             param = D_params[:, i,] # (B, 2, h, w)
             mu, logsd = torch.split(param, 1, dim=1) # (B, 1, h, w)
+            # ------------------------ logistic ------------------------
+            scale = torch.exp(logsd)
             # scale = 0.1 + 0.9 * modules.softplus(torch.exp(logsd) + np.log(np.exp(1.) - 1.))
-            # ar_logp[:,i] += torch.sum(random.logistic_logp(mu, scale, y), dim=(1,2,3)) # (B, 1, h, w) -> (B, )
-            prior = DiagonalGaussian(mu, 2 * logsd)
-            ar_logp[:,i] += torch.sum(prior.logps(y), dim=(1,2,3)) # (B, 1, h, w) -> (B, )
-
-        logdec[self.nz - 1] += logp
+            ar_logp[:,i] += torch.sum(random.logistic_logp(mu, scale, y), dim=(1,2,3)) # (B, 1, h, w) -> (B, )
+            # ------------------------ gaussian ------------------------
+            # prior = DiagonalGaussian(mu, 2 * logsd)
+            # ar_logp[:,i] += torch.sum(prior.logps(y), dim=(1,2,3)) # (B, 1, h, w) -> (B, )
+            # ----------------------------------------------------------
+        logdec[self.nz - 1] += ar_logp
 
         # convert from "nats" to bits
-        logenc = torch.mean(logenc, dim=1) * self.nat2bit
-        logdec = torch.mean(logdec, dim=1) * self.nat2bit
+        logenc   = torch.mean(logenc, dim=1)   * self.nat2bit
+        logdec   = torch.mean(logdec, dim=1)   * self.nat2bit
         logrecon = torch.mean(logrecon, dim=0) * self.nat2bit
 
         # construct the ELBO
