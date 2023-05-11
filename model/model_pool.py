@@ -592,12 +592,13 @@ class ResNet_VAE(nn.Module):
         entrecon = (-1) * logrecon * self.perdimsscale
         kl = entdec - entenc
 
-        self.logger.add_scalar(f'elbo/{tag}',             elbo,     self.global_step)
-        self.logger.add_scalar(f'x/reconstruction/{tag}', entrecon, self.global_step)
-        for i in range(0, logdec.shape[0]):
-            self.logger.add_scalar(f'z{i+1}/encoder/{tag}', entenc[i], self.global_step)
-            self.logger.add_scalar(f'z{i+1}/decoder/{tag}', entdec[i], self.global_step)
-            self.logger.add_scalar(f'z{i+1}/KL/{tag}',      kl[i],     self.global_step)
+        if tag == 'train' or tag == 'test':
+            self.logger.add_scalar(f'elbo/{tag}',             elbo,     self.global_step)
+            self.logger.add_scalar(f'x/reconstruction/{tag}', entrecon, self.global_step)
+            for i in range(0, logdec.shape[0]):
+                self.logger.add_scalar(f'z{i+1}/encoder/{tag}', entenc[i], self.global_step)
+                self.logger.add_scalar(f'z{i+1}/decoder/{tag}', entdec[i], self.global_step)
+                self.logger.add_scalar(f'z{i+1}/KL/{tag}',      kl[i],     self.global_step)
 
         return elbo, zsamples
 
@@ -1455,7 +1456,7 @@ class SHVC_VAE(nn.Module):
             scale = 0.1 + 0.9 * modules.softplus(torch.exp(logsd) + np.log(np.exp(1.) - 1.))
             ar_logp[:,i] += torch.sum(random.logistic_logp(mu, scale, y), dim=(1,2,3)) # (B, 1, h, w) -> (B, )
 
-        logdec[self.nz - 1] += logp
+        logdec[self.nz - 1] += ar_logp
 
         # convert from "nats" to bits
         logenc = torch.mean(logenc, dim=1) * self.bitsscale
@@ -1600,11 +1601,11 @@ class My_SHVC_VAE(nn.Module):
         # hyperparameters
         ori_xdim = hparam.xdim  # (3, 32, 32) or (1, 28, 28) # data shape
         self.xC = ori_xdim[0] << 2
-        self.xdim = (ori_xdim[1] >> 1, ori_xdim[2] >> 1)
+        self.xdim = (self.xC, ori_xdim[1] >> 1, ori_xdim[2] >> 1)
 
         self.nz = hparam.nz  # number of latent variables
         self.zC = hparam.zchannels  # number of channels for the latent variables
-        self.zdim = (self.zC, *self.xdim)
+        self.zdim = (self.zC, *self.xdim[1:])
         
         self.nprocessing = hparam.nprocessing  # number of processing layers
         self.nblock = hparam.resdepth  # number of ResNet blocks
@@ -1618,7 +1619,7 @@ class My_SHVC_VAE(nn.Module):
         # factor to convert "nats" to bits
         self.nat2bit = np.log2(np.e)
         # convert to "bits/dim"
-        self.bpd_scale = 1. / (self.xC * np.prod(self.xdim))
+        self.bpd_scale = 1. / np.prod(self.xdim)
 
 
         # distribute ResNet blocks over latent layers
@@ -1720,6 +1721,9 @@ class My_SHVC_VAE(nn.Module):
             )
             for _ in range(self.nz - 1)])
 
+    # function to set the model to compression mode
+    def compress_mode(self, compress=True):
+        self.compressing = compress
 
     # function that only takes in the layer number and returns a distribution based on that
     def infer(self, i):
@@ -1728,23 +1732,34 @@ class My_SHVC_VAE(nn.Module):
         def distribution(given):
             h = given
 
+            if self.compressing:
+                type = h.type()
+                h = h.float()
+
             # bottom latent layer
             if i == 0:
+                if self.compressing:
+                    h = h.view((-1,) + self.xdim).float()
                 h = self.infer_in(h)
                 h = self.infer_res(h)
                 mu = self.infer_mu(h)
                 # scale = 0.1 + 0.9 * self.sigmoid(self.infer_std(h) + 2.)
-                logsd = self.infer_std(h)
+                scale = torch.exp(self.infer_std(h))
 
             # deeper latent layers
             else:
+                if self.compressing:
+                    h = h.view((-1,) + self.zdim)
                 h = self.deepinfer_in[i - 1](h)
                 h = self.deepinfer_res[i - 1](h)
                 mu = self.deepinfer_mu[i - 1](h)
                 # scale = 0.1 + 0.9 * self.sigmoid(self.deepinfer_std[i - 1](h) + 2.)
-                logsd = self.deepinfer_std[i - 1](h)
+                scale = torch.exp(self.deepinfer_std[i - 1](h))
 
-            return mu, logsd#scale
+            if self.compressing:
+                return torch.flatten(mu).type(type), torch.flatten(scale).type(type)
+            
+            return mu, scale
 
         return distribution
 
@@ -1754,13 +1769,18 @@ class My_SHVC_VAE(nn.Module):
         # and returns the mu and scale parameters of that distribution
         def distribution(given):
             h = given
+            if self.compressing:
+                type = h.type()
+                h = h.float()
+                h = h.view((-1,) + self.zdim)
             h = self.deepgen_in[i - 1](h)
             h = self.deepgen_res[i - 1](h)
             mu = self.deepgen_mu[i - 1](h)
             # scale = 0.1 + 0.9 * modules.softplus(self.deepgen_std[i - 1](h) + np.log(np.exp(1.) - 1.))
-            logsd = self.deepgen_std[i - 1](h)
-
-            return mu, logsd#scale
+            scale = torch.exp(self.deepgen_std[i - 1](h))
+            if self.compressing:
+                return torch.flatten(mu).type(type), torch.flatten(scale).type(type)
+            return mu, scale
 
         return distribution
 
@@ -1777,7 +1797,7 @@ class My_SHVC_VAE(nn.Module):
         logdec = torch.zeros((self.nz, x.shape[0], self.zC), device=x.device)
         logrecon = torch.zeros((x.shape[0], x.shape[1]), device=x.device)
 
-        # ***************************** autoregressive initial bits *****************************
+        # ************************ autoregressive initial bits *************************
         # encode x_i ~ p(x_i|x_1:i-1), i = 12, ..., s+1
         D_params = self.p_x_l_pre_x(x, tag=tag) # (B, 4C, 15, H/2, W/2)
         # ***************************** get frequency mask *****************************
@@ -1798,10 +1818,9 @@ class My_SHVC_VAE(nn.Module):
         x[:, int(self.s)+1:,] = 0
 
         for i in range(self.nz):
-            # ********************************* inference model *********************************
-            mu, logsd = self.infer(i)(given=x if i == 0 else z) #scale
+            # **************************** inference model *****************************
+            mu, scale = self.infer(i)(given=x if i == 0 else z)
             # ------------------------ logistic ------------------------
-            scale = torch.exp(logsd)
             z_next = random.sample_from_logistic(mu, scale, mu.shape, device=mu.device)
             logq = torch.sum(random.logistic_logp(mu, scale, z_next), dim=(2, 3))
             # ------------------------ gaussian ------------------------
@@ -1814,7 +1833,7 @@ class My_SHVC_VAE(nn.Module):
             if i == 0:
                 init_cost = torch.sum(logq, dim=1)
             
-            # ******************************** generative model *********************************
+            # *************************** generative model *****************************
             if i == 0:
                 # encode x_i ~ p(x_i|x_1:i-1, z1), i = s, ..., 1
                 D_params = self.p_x_l_pre_x_z1((x, z_next), tag=tag) # (B, 4C, 15, H/2, W/2)
@@ -1825,9 +1844,8 @@ class My_SHVC_VAE(nn.Module):
                     logrecon[:,i] += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=(1,2,3))         
             else:
                 # get the parameters of inference distribution i given z
-                mu, logsd = self.generate(i)(given=z_next) #scale
+                mu, scale = self.generate(i)(given=z_next)
                 # ------------------------ logistic ------------------------
-                scale = torch.exp(logsd)
                 logp = torch.sum(random.logistic_logp(mu, scale, z), dim=(2, 3))
                 # ------------------------ gaussian ------------------------
                 # prior = DiagonalGaussian(mu, 2 * logsd)
@@ -1876,20 +1894,21 @@ class My_SHVC_VAE(nn.Module):
 
         penalty = torch.mean(torch.max(torch.tensor(0.), - init_cost + init_save)) * self.nat2bit * self.bpd_scale #self.lamb * 
         
-        self.logger.add_scalar(f'elbo/{tag}', elbo, self.global_step)
-        self.logger.add_scalar(f'init_cost/{tag}', torch.mean(init_cost) * self.nat2bit * self.bpd_scale, self.global_step)
-        self.logger.add_scalar(f'init_save/{tag}', torch.mean(init_save) * self.nat2bit * self.bpd_scale, self.global_step)
-        self.logger.add_scalar(f'penalty/{tag}', penalty, self.global_step)
+        if tag == 'train' or tag == 'test':
+            self.logger.add_scalar(f'elbo/{tag}', elbo, self.global_step)
+            self.logger.add_scalar(f'init_cost/{tag}', torch.mean(init_cost) * self.nat2bit * self.bpd_scale, self.global_step)
+            self.logger.add_scalar(f'init_save/{tag}', torch.mean(init_save) * self.nat2bit * self.bpd_scale, self.global_step)
+            self.logger.add_scalar(f'penalty/{tag}', penalty, self.global_step)
 
-        # compute the inference- and generative-model loss
-        entrecon = (-1) * logrecon * self.bpd_scale
-        entenc = torch.sum(logenc, dim=1) * self.bpd_scale
-        entdec = (-1) * torch.sum(logdec, dim=1) * self.bpd_scale
-        for i in range(0, entrecon.shape[0]):
-            self.logger.add_scalar(f'x/c{i+1}/{tag}', entrecon[i], self.global_step)
-        for i in range(0, entenc.shape[0]):
-            self.logger.add_scalar(f'z{i+1}/encoder/{tag}', entenc[i], self.global_step)
-            self.logger.add_scalar(f'z{i+1}/decoder/{tag}', entdec[i], self.global_step)
+            # compute the inference- and generative-model loss
+            entrecon = (-1) * logrecon * self.bpd_scale
+            entenc = torch.sum(logenc, dim=1) * self.bpd_scale
+            entdec = (-1) * torch.sum(logdec, dim=1) * self.bpd_scale
+            for i in range(0, entrecon.shape[0]):
+                self.logger.add_scalar(f'x/c{i+1}/{tag}', entrecon[i], self.global_step)
+            for i in range(0, entenc.shape[0]):
+                self.logger.add_scalar(f'z{i+1}/encoder/{tag}', entenc[i], self.global_step)
+                self.logger.add_scalar(f'z{i+1}/decoder/{tag}', entdec[i], self.global_step)
 
         # print(f'{elbo.item()=}, {penalty.item()=}')
         return elbo + penalty, None
