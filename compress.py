@@ -8,7 +8,8 @@ from config import *
 from codec.codec import Codec
 from utils.common import same_seed, load_model, load_data
 
-cf = Config_bitswap()
+cf = Config_shvc() # Config_bitswap # Config_shvc
+cf_compress = cf.compress_hparam
 
 # seed for replicating experiment and stability
 same_seed(cf.seed)
@@ -21,10 +22,10 @@ if __name__ == '__main__':
     train_set, test_set = load_data(cf.dataset, cf.model_name)
     train_loader = DataLoader(
                     dataset=train_set, 
-                    batch_size=cf.batch_size, 
+                    batch_size=cf_compress.discretization_batch_size, 
                     shuffle=True, drop_last=True)
     test_loader = DataLoader(dataset=test_set, 
-                             batch_size=cf.compression_batch_size, 
+                             batch_size=cf_compress.batch_size, 
                              shuffle=False, drop_last=True)
     cf.model_hparam.xdim = train_set[0][0].shape
     # *********************
@@ -39,13 +40,13 @@ if __name__ == '__main__':
     # ******* state *******
     # fill state list with 'random' bits
     state = list(map(int, np.random.randint(low=1 << 16, high=(1 << 32) - 1, 
-                                            size=cf.init_state_size, 
+                                            size=cf_compress.init_state_size, 
                                             dtype=np.uint32)))
     state[-1] = state[-1] << 32
     # *********************
 
     num_images = test_loader.__len__()
-    codec = Codec(cf, model, (train_loader, test_loader), state, num_images)
+    codec = Codec(cf_compress, model, (train_loader, test_loader), state, num_images)
 
     encode_t0 = time.time()
     codec.compress()

@@ -4,7 +4,7 @@ import pickle
 import torch
 import os
 
-from .bbc_scheme import BitSwap, BBC
+from .bbc_scheme import BitSwap, BBC, SHVC_BitSwap_ANS
 from utils.torch.rand import ImageBins
 
 '''
@@ -53,7 +53,7 @@ class Codec:
 
         # metrics for the results
         nets  = np.zeros((self.num_data, ), dtype=np.float64)
-        # elbos = np.zeros((self.num_data, ), dtype=np.float64)
+        elbos = np.zeros((self.num_data, ), dtype=np.float64)
         cma   = np.zeros((self.num_data, ), dtype=np.float64)
         total = np.zeros((self.num_data, ), dtype=np.float64)
 
@@ -66,16 +66,19 @@ class Codec:
             # print(f'{i}-th {len(self.state)=}')
             if i == self.num_data:
                 break
-            x = x.to(self.cf.device).view(self.total_xdim)
+            x = x.to(self.cf.device)#.view(self.total_xdim)
 
             # calculate ELBO
-            # with torch.no_grad():
-            #     self.model.compress_mode(False)
-            #     elbo, _ = self.model.loss(x.view((-1,) + self.model.xdim), 'test')
-            #     self.model.compress_mode(True)
+            with torch.no_grad():
+                self.model.compress_mode(False)
+                elbo, _ = self.model.loss(x, 'compress') # x.view((-1,) + self.model.xdim)
+                self.model.compress_mode(True)
 
             if self.cf.bbc_scheme == 'bitswap':
-                scheme = BitSwap(self.cf, self.model, self.state, self.x_bin, self.z_bin)
+                if self.cf.model_name == 'shvc':
+                    scheme = SHVC_BitSwap_ANS(self.cf, self.model, self.state, self.x_bin, self.z_bin)
+                else:
+                    scheme = BitSwap(self.cf, self.model, self.state, self.x_bin, self.z_bin)
             else:
                 scheme = BBC(self.cf, self.model, self.state, self.x_bin, self.z_bin)
             
@@ -87,12 +90,12 @@ class Codec:
 
             # logging
             nets[i]  = (total_added_bits / self.total_xdim) - nets[:i].sum()
-            # elbos[i] = elbo.item() / self.total_xdim
+            elbos[i] = elbo.item() / self.total_xdim
             cma[i]   = totalbits / (self.total_xdim * (i + 1))
             total[i] = totalbits
 
             iterator.set_postfix_str(s=f"N:{nets[:i+1].mean():.2f}±{nets[:i+1].std():.2f}, " + 
-                                    #    f"D:{nets[:i+1].mean()-elbos[:i+1].mean():.4f}, " +
+                                       f"D:{nets[:i+1].mean()-elbos[:i+1].mean():.4f}, " +
                                        f"C: {cma[:i+1].mean():.2f}, " +
                                        f"T: {totalbits:.0f}", refresh=False)
 
@@ -102,9 +105,13 @@ class Codec:
         with open(os.path.join(self.cf.state_dir, f"{self.cf.model_name}.pt"), "wb") as fp:
             pickle.dump(self.state, fp)
         
-        print(f"N:{nets.mean():.4f}±{nets.std():.2f}, ")# +
-            #   f"E:{elbos.mean():.4f}±{elbos.std():.2f}, " +
-            #   f"D:{nets.mean() - elbos.mean():.6f}")
+        print(f"N:{nets.mean():.4f}±{nets.std():.2f}, " +
+              f"E:{elbos.mean():.4f}±{elbos.std():.2f}, " +
+              f"D:{nets.mean() - elbos.mean():.6f}")
+        
+        print(f"ELBO: {elbos.mean()}, " +
+              f"Net Bitrate: {(len(self.state) - len(self.initialstate)) * 32 / (self.total_xdim * self.num_data)}, " +
+              f"Bitrate(with initial bits): {(len(self.state) - (len(scheme.restbits) - 1)) * 32 / (self.total_xdim * self.num_data)}, ")
         
         print('compression complete')
         return

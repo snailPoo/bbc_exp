@@ -9,10 +9,10 @@ from sklearn.preprocessing import KBinsDiscretizer
 def posterior_sampling(cf, model, train_loader):
     
     nz = model.nz
-    zdim = (model.zchannels, 16, 16)
+    zdim = model.zdim
     quantbits = cf.z_quantbits
     num_sample_per_bin = 30
-
+    batch_size = cf.discretization_batch_size
     num_bin = (1 << quantbits)
     # total number of samples (num_sample_per_bin * number of bins)
     total_samples = num_sample_per_bin * num_bin
@@ -26,14 +26,17 @@ def posterior_sampling(cf, model, train_loader):
             z_bin_ends = np.zeros((nz, total_zdim, num_bin - 1))
             z_bin_centres   = np.zeros((nz, total_zdim, num_bin))
 
+            # --------------------------- original ---------------------------
             # top latent is fixed, so we can calculate the discretization bins without samples
-            zbins = Bins(mu = torch.zeros((1, 1, total_zdim)), 
-                         scale = torch.ones((1, 1, total_zdim)), 
-                         precision = quantbits)
-            z_bin_ends[nz - 1] = zbins.endpoints().numpy()
-            z_bin_centres[nz - 1] = zbins.centres().numpy()
+            if cf.model_name == 'bitswap':
+                zbins = Bins(mu = torch.zeros((1, 1, total_zdim)), 
+                            scale = torch.ones((1, 1, total_zdim)), 
+                            precision = quantbits)
+                z_bin_ends[nz - 1] = zbins.endpoints().numpy()
+                z_bin_centres[nz - 1] = zbins.centres().numpy()
+            # ----------------------------------------------------------------
 
-            num_batch = total_samples // cf.batch_size # number of num_batch
+            num_batch = total_samples // batch_size # number of num_batch
 
             # set-up a batch-loader for the datasetc
             datapoints = list(train_loader)
@@ -46,7 +49,26 @@ def posterior_sampling(cf, model, train_loader):
             gen_samples = np.zeros((nz, total_samples) + zdim, dtype=np.float16)
             inf_samples = np.zeros((nz, total_samples) + zdim, dtype=np.float16)
 
-            gen_samples[-1] = sample_from_logistic(0, 1, (total_samples,) + zdim, device="cpu", bound=1e-30).numpy()
+            # --------------------------- original ---------------------------
+            if cf.model_name == 'bitswap':
+                gen_samples[-1] = sample_from_logistic(0, 1, (total_samples,) + zdim, device="cpu", bound=1e-30).numpy()
+            # ------------------------ autoregressive ------------------------
+            elif cf.model_name == 'shvc':
+                iterator = tqdm(range(num_batch), desc=f"sampling z{nz} from generator")
+                for bi in iterator:
+                    gen_from = bi * batch_size
+                    to = gen_from + batch_size
+                    hidden = None
+                    lstm_input = torch.zeros((batch_size, 1, 1, model.zdim[-2], model.zdim[-1])).to(cf.device) # z3: (B, c=1, 1, h, w)
+                    for i in range(0, model.zdim[0]):
+                        param, hidden = model.p_z.ar_model(lstm_input, hidden=hidden) # z3: (B, c=1, 2, h, w)
+                        mu, logsd = torch.split(param.squeeze(1), 1, dim=1) # (B, 1, h, w)
+                        mu = mu.squeeze(1)
+                        scale = torch.exp(logsd.squeeze(1))
+                        lstm_input = sample_from_logistic(mu, scale, mu.shape, device=cf.device, bound=1e-30)
+                        gen_samples[-1][gen_from: to, i,] = lstm_input.cpu().numpy()
+                        lstm_input = lstm_input.unsqueeze(1).unsqueeze(1)
+            # ----------------------------------------------------------------
 
             # iterate over the latent variables
             # gen z7 given z8 ~ gen z1 given z2
@@ -54,26 +76,36 @@ def posterior_sampling(cf, model, train_loader):
                 # obtain samples from the generative model
                 iterator = tqdm(range(num_batch), desc=f"sampling z{zi} from generator")
                 for bi in iterator:
-                    gen_from = bi * cf.batch_size
-                    to = gen_from + cf.batch_size
+                    gen_from = bi * batch_size
+                    to = gen_from + batch_size
 
                     mu, scale = model.generate(zi)(given=torch.from_numpy(gen_samples[zi][gen_from: to]).to(cf.device).float())
                     gen_samples[zi - 1][gen_from: to] = sample_from_logistic(mu, scale, mu.shape, device=cf.device, bound=1e-30).cpu()
 
             # inf z1 given x ~ inf z7 given z6
-            for zi in range(0, nz - 1):
+            rng = nz - 1 if cf.model_name == 'bitswap' else nz
+            for zi in range(0, rng):
                 # obtain samples from the inference model (using the dataset)
                 iterator = tqdm(range(num_batch), desc=f"sampling z{zi + 1} from inference model")
                 for bi in iterator:
+                    gen_from = bi * batch_size
+                    to = gen_from + batch_size
+
                     if zi == 0: # z1
                         given = datapoints[bi][0]
+                        # ------------ autoregressive ------------
+                        if cf.model_name == 'shvc':
+                            given = modules.lossless_downsample(given)
+                            given[:, int(model.s)+1:,] = 0
+                        # ----------------------------------------
                     else:
                         given = torch.from_numpy(inf_samples[zi - 1][gen_from: to])
+                    
                     mu, scale = model.infer(zi)(given=given.to(cf.device).float())
                     inf_samples[zi][gen_from: to] = sample_from_logistic(mu, scale, mu.shape, device=cf.device, bound=1e-30).cpu().numpy()
 
             # get the discretization bins
-            for zi in range(nz - 1):
+            for zi in range(rng):
                 samples = np.concatenate([gen_samples[zi], inf_samples[zi]], axis=0).reshape(-1, total_zdim)
                 z_bin_ends[zi], z_bin_centres[zi] = discretize_kbins(samples, quantbits, strategy='uniform')
 

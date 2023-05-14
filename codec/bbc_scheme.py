@@ -16,7 +16,7 @@ class bbc_base:
         self.x_quantbits = config.x_quantbits
         self.restbits = None
         self.restbits_tag = True
-
+        self.total_xdim = np.prod(self.model.xdim)
         self.prior_mu = torch.zeros(1, device=config.device, dtype=config.type)
         self.prior_scale = torch.ones(1, device=config.device, dtype=config.type)
 
@@ -49,6 +49,7 @@ class BitSwap(bbc_base):
         super().__init__(config, model, state, x_bin, z_bin)
 
     def encoding(self, x):
+        x = x.view(self.total_xdim)
         for zi in range(self.model.nz):
             given = self.z_bin_centres[zi - 1, self.zrange, z_sym] if zi > 0 else self.x_bin_centres[self.xrange, x.long()]
             z_symtop = self.variable_decode('inf', zi, given, self.z_bin_ends[zi], self.z_quantbits)
@@ -95,6 +96,7 @@ class BBC(bbc_base):
         super(BBC, self).__init__(config, model, state, x_bin, z_bin)
     
     def encoding(self, x):
+        x = x.view(self.total_xdim)
         zs = []
         # decode all latent variables
         for zi in range(self.model.nz):
@@ -390,9 +392,9 @@ def ResNetVAE(config, model):
     return BBANS(cs.Codec(prior_push, prior_pop), likelihood, posterior)
 
 
-from utils.torch.modules import np_lossless_downsample, lossless_upsample
+from utils.torch.modules import np_lossless_downsample, lossless_downsample, lossless_upsample
 
-def SHVC_BitSwap(config, model):
+def SHVC_BitSwap_vANS(config, model):
 
     z_view = lambda head: head[0]
     x_view = lambda head: head[1] # one channel of downsampled image
@@ -431,8 +433,7 @@ def SHVC_BitSwap(config, model):
         z = None
         # ************************************************************************************************
         for zi in range(model.nz):
-            mu, logsd = model.infer(zi)(given=x if zi == 0 else z)
-            scale = torch.exp(logsd)
+            mu, scale = model.infer(zi)(given=x if zi == 0 else z)
             posterior = substack(
                 # cs.Logistic_UnifBins(mu.cpu().numpy(), 
                 #                      torch.log(scale).cpu().numpy(), 
@@ -468,14 +469,14 @@ def SHVC_BitSwap(config, model):
                     state, = likelihood.push(state, y)
                 # ************************************************************************************************     
             else:
-                mu, logsd = model.generate(zi)(given=z_next)
+                mu, scale = model.generate(zi)(given=z_next)
                 prior = substack(
                     # cs.Logistic_UnifBins(mu.cpu().numpy(), 
                     #                      torch.log(scale).cpu().numpy(), 
                     #                      latent_prec, latent_bin, 
                     #                      bin_lb=-np.inf, bin_ub=np.inf),
                     cs.DiagGaussian_StdBins(mu.cpu().numpy(), 
-                                            torch.exp(logsd).cpu().numpy(), 
+                                            scale.cpu().numpy(), 
                                             latent_prec, latent_bin), 
                     z_view)
                 # print(f'prior push z{zi-1}')
@@ -489,7 +490,9 @@ def SHVC_BitSwap(config, model):
         D_params = model.p_z(z) # z3: (B, c, 2, h, w)
         for i in range(z.size(1)-1, -1, -1):
             y = z_idx[:, i,] # z3: (B, 1, h, w)
+            print(f'encode ch.{i} y\n{y}')
             param = D_params[:, i,] # (B, 2, h, w)
+            print(f'encode ch.{i} param\n{param}')
             mu, logsd = torch.split(param, 1, dim=1) # (B, 1, h, w)
             mu = mu.squeeze(1).cpu().numpy()
             scale = torch.exp(logsd.squeeze(1)).cpu().numpy()
@@ -516,9 +519,10 @@ def SHVC_BitSwap(config, model):
         lstm_input = torch.zeros((config.batch_size, 1, 1, model.zdim[-2], model.zdim[-1])).to(device) # z3: (B, c=1, 1, h, w)
         for i in range(0, z_next.size(1)):
             param, hidden = model.p_z.ar_model(lstm_input, hidden=hidden) # z3: (B, c=1, 2, h, w)
+            print(f'decode ch.{i} param\n{param}')
             mu, logsd = torch.split(param.squeeze(1), 1, dim=1) # (B, 1, h, w)
             mu = mu.squeeze(1) # (B, h, w)
-            scale = torch.exp(logsd).squeeze(1)
+            scale = torch.exp(logsd.squeeze(1))
             prior = substack(
                 cs.DiagGaussian_StdBins(mu.cpu().numpy(), 
                                         scale.cpu().numpy(), 
@@ -528,6 +532,7 @@ def SHVC_BitSwap(config, model):
             z_next_idx[:, i,] = z_C_idx
             z_next[:, i,] = mu + torch.from_numpy(z_inv_cdf[z_C_idx].astype(np.float32)).to(device) * scale # (B, h, w)
             lstm_input = z_next[:, i,].unsqueeze(1).unsqueeze(1)
+            print(f'decode ch.{i} pop(=next lstm_input)\n{lstm_input}')
         
         for zi in reversed(range(model.nz)):
             if zi == 0:
@@ -553,8 +558,7 @@ def SHVC_BitSwap(config, model):
                     x[:, i,] = torch.from_numpy(x_C).to(device)
                     lstm_input = x[:, i,].unsqueeze(1).unsqueeze(1)
             else:
-                mu, logsd = model.generate(zi)(given=z_next)
-                scale = torch.exp(logsd)
+                mu, scale = model.generate(zi)(given=z_next)
                 prior = substack(
                     cs.DiagGaussian_StdBins(mu.cpu().numpy(), 
                                             scale.cpu().numpy(), 
@@ -563,10 +567,10 @@ def SHVC_BitSwap(config, model):
                 state, z_idx = prior.pop(state)
                 z = mu + torch.from_numpy(z_inv_cdf[z_idx].astype(np.float32)).to(device) * scale
                 
-            mu, logsd = model.infer(zi)(given=x if zi == 0 else z)
+            mu, scale = model.infer(zi)(given=x if zi == 0 else z)
             posterior = substack(
                 cs.DiagGaussian_StdBins(mu.cpu().numpy(), 
-                                        torch.exp(logsd).cpu().numpy(), 
+                                        scale.cpu().numpy(), 
                                         latent_prec, latent_bin),
                 z_view)
             state, = posterior.push(state, z_next_idx)
@@ -593,3 +597,98 @@ def SHVC_BitSwap(config, model):
         return state, x
     
     return cs.Codec(encoding, decoding)
+
+from utils.torch.rand import get_batch_pmfs, mixture_discretized_logistic_cdf, logistic_cdf
+
+class SHVC_BitSwap_ANS():
+    def __init__(self, config, model, state, x_bin, z_bin):
+        self.model = model
+        self.state = state
+        self.batch_size = config.batch_size
+        self.z_bin_ends, self.z_bin_centres = z_bin
+        self.x_bin_ends, self.x_bin_centres = x_bin
+        self.batch_x_bin_ends = self.x_bin_ends[0].view(-1, 1, 1, 1).expand(-1, self.batch_size, np.prod(self.model.xdim[1:]), 5) # (255, ) -> (255, B, H * W * C, nr_mix)
+        self.xrange = torch.arange(np.prod(model.xdim))
+        self.zrange = torch.arange(np.prod(model.zdim))
+        self.z_quantbits = config.z_quantbits
+        self.x_quantbits = config.x_quantbits
+        self.total_xdim = np.prod(self.model.xdim)
+
+    @torch.no_grad()
+    def encoding(self, data):
+        data = lossless_downsample(data).long()
+        x = (data - 127.5) / 127.5
+
+        # ************************************************************************************************
+        D_params = self.model.p_x_l_pre_x(x)
+        for i in range(x.size(1)-1, int(self.model.s), -1):
+            y = torch.flatten(data[:, i,], start_dim=1) # (B, H/2 * W/2)
+            param = D_params[:, i,] # (B, 15, H/2, W/2)
+            cdfs = mixture_discretized_logistic_cdf(self.batch_x_bin_ends, param, 5) # (B, H/2 * W/2, 255)
+            pmfs = get_batch_pmfs(cdfs)
+            # self.state = ANS(pmfs, self.x_quantbits).encode(self.state, y) # batch execute ANS 
+        
+        x[:, int(self.model.s)+1:,] = 0
+        data[:, int(self.model.s)+1:,] = 0
+        z = None
+        # ************************************************************************************************
+
+        for zi in range(self.model.nz):
+            if zi > 0:
+                given = self.z_bin_centres[zi - 1, self.zrange, z]
+            else:
+                given = self.x_bin_centres[self.xrange, torch.flatten(data, start_dim=1)]
+            mu, scale = self.model.infer(zi)(given=given)
+            z_bin_ends = self.z_bin_ends[zi].t().unsqueeze(1).expand(-1, self.batch_size, -1)
+            cdfs = logistic_cdf(z_bin_ends, mu, scale)
+            pmfs = get_batch_pmfs(cdfs)
+            # self.state, z_next = ANS(pmfs, self.z_quantbits).decode(self.state)
+
+            given = self.z_bin_centres[zi, self.zrange, z_next] # z
+            if zi == 0:
+                # encode x_i ~ p(x_i|x_1:i-1, z1), i = s, ..., 1
+                D_params = self.p_x_l_pre_x_z1((x, given.view(self.batch_size, self.model.zdim))) # (B, 4C, 15, H/2, W/2)
+                for i in range(int(self.s), -1, -1):        
+                    y = torch.flatten(data[:, i,], start_dim=1) # (B, H/2 * W/2)
+                    param = D_params[:, i,] # (B, 15, H/2, W/2)
+                    cdfs = mixture_discretized_logistic_cdf(self.batch_x_bin_ends, param, 5) # (B, H/2 * W/2, 255)
+                    pmfs = get_batch_pmfs(cdfs)
+                    # self.state = ANS(pmfs, self.x_quantbits).encode(self.state, y) # batch execute ANS 
+            else:
+                mu, scale = self.model.generate(zi)(given=given)
+                z_bin_ends = self.z_bin_ends[zi - 1].t().unsqueeze(1).expand(-1, self.batch_size, -1)
+                cdfs = logistic_cdf(z_bin_ends, mu, scale)
+                pmfs = get_batch_pmfs(cdfs)
+                # self.state = ANS(pmfs, self.z_quantbits).encode(self.state, z)
+
+            z = z_next
+
+        # autoregressively encode prior
+        D_params = self.p_z(z) # z3: (B, c, 2, h, w)
+        for i in range(z.size(1)-1, -1, -1):
+            y = z[:, i,].unsqueeze(1) # z3: (B, 1, h, w)
+            param = D_params[:, i,] # (B, 2, h, w)
+            mu, logsd = torch.split(param, 1, dim=1) # (B, 1, h, w)
+            # ------------------------ logistic ------------------------
+            scale = torch.exp(logsd) # 若要修改，discretization.py 也要動
+            # scale = 0.1 + 0.9 * modules.softplus(torch.exp(logsd) + np.log(np.exp(1.) - 1.))
+
+        return self.state
+    
+    def decoding(self):
+        z_symtop = self.prior_decode(self.z_bin_ends[-1])
+        
+        for zi in reversed(range(self.model.nz)):
+            given = self.z_bin_centres[zi, self.zrange, z_symtop]
+            if zi == 0:
+                sym = self.variable_decode('gen', zi, given, self.x_bin_ends, self.x_quantbits)
+                given = self.x_bin_centres[self.xrange, sym]
+            else:
+                sym = self.variable_decode('gen', zi, given, self.z_bin_ends[zi - 1], self.z_quantbits)
+                given = self.z_bin_centres[zi - 1, self.zrange, sym]
+
+            self.variable_encode(z_symtop, 'inf', zi, given, self.z_bin_ends[zi], self.z_quantbits)
+            
+            z_symtop = sym
+
+        return z_symtop, self.state
