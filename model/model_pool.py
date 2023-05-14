@@ -821,7 +821,7 @@ class Channel_wise_AR(nn.Module):
 
     def get_distribution_param(self, input, tag='test'):
         if self.z1_cond:
-            x, z1 = input # (B, 4C, H/2, W/2), (B, 32, H/4, W/4)
+            x, z1 = input # (B, 4C/s/, H/2, W/2), (B, 32, H/4, W/4)
             z1_embd = self.z1_cond_network(z1) # (B, 4, H/2, W/2)
             z1_embd = z1_embd.unsqueeze(1).repeat(1, x.size(1), 1, 1, 1) # (B, 4C, 4, H/2, W/2)
         else:
@@ -1597,6 +1597,7 @@ class My_SHVC_VAE(nn.Module):
         self.logger = None
         self.global_step = 0
         self.best_elbo = np.inf
+        self.compressing = False
 
         # hyperparameters
         ori_xdim = hparam.xdim  # (3, 32, 32) or (1, 28, 28) # data shape
@@ -1743,8 +1744,8 @@ class My_SHVC_VAE(nn.Module):
                 h = self.infer_in(h)
                 h = self.infer_res(h)
                 mu = self.infer_mu(h)
-                # scale = 0.1 + 0.9 * self.sigmoid(self.infer_std(h) + 2.)
-                scale = torch.exp(self.infer_std(h))
+                scale = 0.1 + 0.9 * self.sigmoid(self.infer_std(h) + 2.)
+                # scale = torch.exp(self.infer_std(h))
 
             # deeper latent layers
             else:
@@ -1753,11 +1754,12 @@ class My_SHVC_VAE(nn.Module):
                 h = self.deepinfer_in[i - 1](h)
                 h = self.deepinfer_res[i - 1](h)
                 mu = self.deepinfer_mu[i - 1](h)
-                # scale = 0.1 + 0.9 * self.sigmoid(self.deepinfer_std[i - 1](h) + 2.)
-                scale = torch.exp(self.deepinfer_std[i - 1](h))
+                scale = 0.1 + 0.9 * self.sigmoid(self.deepinfer_std[i - 1](h) + 2.)
+                # scale = torch.exp(self.deepinfer_std[i - 1](h))
 
             if self.compressing:
-                return torch.flatten(mu).type(type), torch.flatten(scale).type(type)
+                mu = torch.flatten(mu, start_dim=1).type(type)
+                scale = torch.flatten(scale, start_dim=1).type(type)
             
             return mu, scale
 
@@ -1776,10 +1778,12 @@ class My_SHVC_VAE(nn.Module):
             h = self.deepgen_in[i - 1](h)
             h = self.deepgen_res[i - 1](h)
             mu = self.deepgen_mu[i - 1](h)
-            # scale = 0.1 + 0.9 * modules.softplus(self.deepgen_std[i - 1](h) + np.log(np.exp(1.) - 1.))
-            scale = torch.exp(self.deepgen_std[i - 1](h))
+            scale = 0.1 + 0.9 * modules.softplus(self.deepgen_std[i - 1](h) + np.log(np.exp(1.) - 1.))
+            # scale = torch.exp(self.deepgen_std[i - 1](h))
             if self.compressing:
-                return torch.flatten(mu).type(type), torch.flatten(scale).type(type)
+                mu = torch.flatten(mu, start_dim=1).type(type)
+                scale = torch.flatten(scale, start_dim=1).type(type)
+            
             return mu, scale
 
         return distribution
@@ -1795,7 +1799,7 @@ class My_SHVC_VAE(nn.Module):
         # tensor to store inference model losses, generative model losses, and reconstruction losses
         logenc = torch.zeros((self.nz, x.shape[0], self.zC), device=x.device)
         logdec = torch.zeros((self.nz, x.shape[0], self.zC), device=x.device)
-        logrecon = torch.zeros((x.shape[0], x.shape[1]), device=x.device)
+        logrecon = torch.zeros((x.shape[0], self.xC), device=x.device)
 
         # ************************ autoregressive initial bits *************************
         # encode x_i ~ p(x_i|x_1:i-1), i = 12, ..., s+1
@@ -1804,18 +1808,26 @@ class My_SHVC_VAE(nn.Module):
         # mask = self.threshold_net(D_params)
         # D_params_high = self.p_x_l_pre_x_high(x, mask) # (B, 4C, 15, H/2, W/2)
         # ******************************************************************************
-        for i in range(x.size(1)-1, int(self.s), -1):
-            y = x[:, i,].unsqueeze(1) # (B, 1, H/2, W/2)
-            param = D_params[:, i,] # (B, 15, H/2, W/2)
-            # ***************************** get frequency mask *************************
-            # param_h = D_params_high[:, i,] # (B, 15, H/2, W/2)
-            # param = param_l[mask] + param_h[(1-mask)]
-            # **************************************************************************
-            # it should be (B, H, W, C) -> (B, C) in general, but C=1 in my case, so -> (B, )
-            logrecon[:,i] += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=(1,2,3))
+        # for i in range(x.size(1)-1, int(self.s), -1): # TODO -> done in one loop
+        #     y = x[:, i,].unsqueeze(1) # (B, 1, H/2, W/2)
+        #     param = D_params[:, i,].unsqueeze(1) # (B, 1, 15, H/2, W/2)
+        #     # ***************************** get frequency mask *************************
+        #     # param_h = D_params_high[:, i,] # (B, 15, H/2, W/2)
+        #     # param = param_l[mask] + param_h[(1-mask)]
+        #     # **************************************************************************
+        #     # it should be (B, H, W, C) -> (B, C) in general, but C=1 in my case, so -> (B, )
+        #     logrecon[:,i] += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=(1,2,3))
+        logrecon[:, int(self.s):,] += torch.sum(random.discretized_mix_logistic_logp(x[:, int(self.s):,], D_params[:, int(self.s):,]), dim=(-1,-2))
 
         init_save = torch.sum(logrecon, dim=1)
-        x[:, int(self.s)+1:,] = 0
+        # x[:, int(self.s):,] = 0
+        # mask = torch.zeros(x.shape, dtype=torch.bool).to(x.device)
+        # mask[:, int(self.s):,] = 1
+        # x.masked_fill_(mask, -1.0078125)
+        mask1 = torch.ones(x[:, :int(self.s),].shape, dtype=torch.bool).to(x.device)
+        mask0 = torch.zeros(x[:, int(self.s):,].shape, dtype=torch.bool).to(x.device)
+        mask = torch.cat((mask1, mask0), dim=1)
+        x *= mask
 
         for i in range(self.nz):
             # **************************** inference model *****************************
@@ -1832,16 +1844,24 @@ class My_SHVC_VAE(nn.Module):
             logenc[i] += logq
             if i == 0:
                 init_cost = torch.sum(logq, dim=1)
+                # see why log prob > 0 ?
+                # tmp_logq = random.logistic_logp(mu, scale, z_next).detach().cpu().numpy()
+                # wield_idx = np.where(tmp_logq > 0)
+                # print(len(wield_idx[0]))
+                # if len(wield_idx[0])!=0:
+                #     for t in range(len(wield_idx[0])):
+                #         print(f'mu:{mu.detach().cpu().numpy()[wield_idx][t]} scale:{scale.detach().cpu().numpy()[wield_idx][t]} z:{z_next.detach().cpu().numpy()[wield_idx][t]} logq: {tmp_logq[wield_idx][t]}')
             
             # *************************** generative model *****************************
             if i == 0:
                 # encode x_i ~ p(x_i|x_1:i-1, z1), i = s, ..., 1
-                D_params = self.p_x_l_pre_x_z1((x, z_next), tag=tag) # (B, 4C, 15, H/2, W/2)
-                for i in range(int(self.s), -1, -1):
-                    y = x[:, i,].unsqueeze(1) # (B, 1, H/2, W/2)
-                    param = D_params[:, i,] # (B, 15, H/2, W/2)
-                    # it should be (B, H, W, C) -> (B, C) in general, but C=1 in my case, so -> (B, )
-                    logrecon[:,i] += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=(1,2,3))         
+                # D_params = self.p_x_l_pre_x_z1((x[:, :int(self.s),], z_next), tag=tag) # (B, 4C, 15, H/2, W/2)
+                # for i in range(int(self.s), -1, -1):
+                #     y = x[:, i,].unsqueeze(1) # (B, 1, H/2, W/2)
+                #     param = D_params[:, i,].unsqueeze(1) # (B, 1, 15, H/2, W/2)
+                #     # it should be (B, H, W, C) -> (B, C) in general, but C=1 in my case, so -> (B, )
+                #     logrecon[:,i] += torch.sum(random.discretized_mix_logistic_logp(y, param), dim=(1,2,3))         
+                    logrecon[:, :int(self.s),] += torch.sum(random.discretized_mix_logistic_logp(x[:, :int(self.s),], D_params[:, :int(self.s),]), dim=(-1,-2))
             else:
                 # get the parameters of inference distribution i given z
                 mu, scale = self.generate(i)(given=z_next)
@@ -1858,21 +1878,24 @@ class My_SHVC_VAE(nn.Module):
 
         # autoregressive factorization prior
         # encode z ~ p(z_i|z_1:i-1)
-        ar_logp = torch.zeros((z.size(0), z.size(1))).to(z.device) # (B, num_total_channel)
         D_params = self.p_z(z, tag=tag) # z3: (B, c, 2, h, w)
-        for i in range(z.size(1)-1, -1, -1):
-            y = z[:, i,].unsqueeze(1) # z3: (B, 1, h, w)
-            param = D_params[:, i,] # (B, 2, h, w)
-            mu, logsd = torch.split(param, 1, dim=1) # (B, 1, h, w)
-            # ------------------------ logistic ------------------------
-            scale = torch.exp(logsd)
-            # scale = 0.1 + 0.9 * modules.softplus(torch.exp(logsd) + np.log(np.exp(1.) - 1.))
-            ar_logp[:,i] += torch.sum(random.logistic_logp(mu, scale, y), dim=(1,2,3)) # (B, 1, h, w) -> (B, )
-            # ------------------------ gaussian ------------------------
-            # prior = DiagonalGaussian(mu, 2 * logsd)
-            # ar_logp[:,i] += torch.sum(prior.logps(y), dim=(1,2,3)) # (B, 1, h, w) -> (B, )
-            # ----------------------------------------------------------
-        logdec[self.nz - 1] += ar_logp
+        # ar_logp = torch.zeros((z.size(0), z.size(1))).to(z.device) # (B, num_total_channel)
+        # for i in range(z.size(1)-1, -1, -1):
+        #     y = z[:, i,].unsqueeze(1) # z3: (B, 1, h, w)
+        #     param = D_params[:, i,] # (B, 2, h, w)
+        #     mu, logsd = torch.split(param, 1, dim=1) # (B, 1, h, w)
+        #     # ------------------------ logistic ------------------------
+        #     # scale = torch.exp(logsd)
+        #     scale = 0.1 + 0.9 * modules.softplus(torch.exp(logsd) + np.log(np.exp(1.) - 1.))
+        #     ar_logp[:,i] += torch.sum(random.logistic_logp(mu, scale, y), dim=(1,2,3)) # (B, 1, h, w) -> (B, )
+        #     # ------------------------ gaussian ------------------------
+        #     # prior = DiagonalGaussian(mu, 2 * logsd)
+        #     # ar_logp[:,i] += torch.sum(prior.logps(y), dim=(1,2,3)) # (B, 1, h, w) -> (B, )
+        #     # ----------------------------------------------------------
+        mu, logsd = torch.split(D_params, 1, dim=2) # (B, c, 1, h, w)
+        mu = mu.squeeze(2) # (B, c, h, w)
+        scale = 0.1 + 0.9 * modules.softplus(torch.exp(logsd.squeeze(2)) + np.log(np.exp(1.) - 1.))
+        logdec[self.nz - 1] += torch.sum(random.logistic_logp(mu, scale, z), dim=(2,3)) # (B, c, h, w) -> (B, c)
 
         # convert from "nats" to bits
         logenc   = torch.mean(logenc, dim=1)   * self.nat2bit
@@ -1892,7 +1915,7 @@ class My_SHVC_VAE(nn.Module):
         # scale by image dimensions to get "bits/dim"
         elbo *= self.bpd_scale
 
-        penalty = torch.mean(torch.max(torch.tensor(0.), - init_cost + init_save)) * self.nat2bit * self.bpd_scale #self.lamb * 
+        penalty = self.lamb * torch.mean(torch.max(torch.tensor(0.), - init_cost + init_save)) # * self.nat2bit * self.bpd_scale
         
         if tag == 'train' or tag == 'test':
             self.logger.add_scalar(f'elbo/{tag}', elbo, self.global_step)
@@ -1910,5 +1933,6 @@ class My_SHVC_VAE(nn.Module):
                 self.logger.add_scalar(f'z{i+1}/encoder/{tag}', entenc[i], self.global_step)
                 self.logger.add_scalar(f'z{i+1}/decoder/{tag}', entdec[i], self.global_step)
 
-        # print(f'{elbo.item()=}, {penalty.item()=}')
-        return elbo + penalty, None
+        # print(f'elbo:{elbo.item()}, penalty:{penalty.item()} s:{self.s.item()} s.grad:{self.s.grad} init_save:{init_save.mean().item()} init_cost:{init_cost.mean().item()}')
+
+        return elbo, None # + penalty
