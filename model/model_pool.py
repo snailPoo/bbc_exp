@@ -48,6 +48,8 @@ class BetaBinomialVAE(nn.Module):
         self.best_elbo = np.inf
         self.logger = None
 
+        self.init_cost_record = 0
+
     def encode(self, x):
         """Return mu, sigma on latent"""
         x = x.view(-1, self.x_flat)
@@ -680,6 +682,8 @@ class Convolutional_VAE(nn.Module):
 
         self.logger = None
         self.global_step = 0
+
+        self.init_cost_record = 0
 
         self.register_parameter('h', nn.Parameter(torch.zeros(self.h_size)))
         self.register_parameter('dec_log_stdv', nn.Parameter(torch.Tensor([0.])))

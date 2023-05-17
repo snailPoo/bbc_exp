@@ -12,7 +12,7 @@ from config import *
 from utils.common import load_data, load_model, load_scheme, same_seed
 
 
-cf = Config_shvc() # Config_bbans # Config_hilloc # Config_shvc
+cf = Config_hilloc() # Config_bbans # Config_hilloc # Config_shvc
 cf_compress = cf.compress_hparam
 cf_model = cf.model_hparam
 
@@ -24,7 +24,7 @@ print(f"Model:{cf.model_name}; Dataset:{cf.dataset}")
 _, test_set = load_data(cf.dataset, cf.model_name, load_train=False)
 cf_model.xdim = test_set[0][0].shape
 
-num_images = 1#len(test_set)
+num_images = len(test_set)
 batch_size = cf_compress.batch_size
 n_batches = num_images // batch_size
 
@@ -79,6 +79,8 @@ else:
     with open(state_path, 'wb') as f:
         pickle.dump(state, f)
 
+init_state = cs.flatten(state)
+
 init_head_shape = (np.prod(codec_shape) + np.prod(latent_shape),)
 state = cs.reshape_head(state, init_head_shape)
 
@@ -94,17 +96,30 @@ encode_t = time.time() - encode_t0
 print("All encoded in {:.2f}s".format(encode_t))
 print("Average singe image encoding time: {:.2f}s.".format(encode_t / num_images))
 
-flat_t0 = time.time()
 flat_state = cs.flatten(state)
-print("flatten state cost {:.2f}s.".format(time.time() - flat_t0))
-
 state_len = 32 * len(flat_state)
-print("Used {} bits.".format(state_len))
-print("This is {:.2f} bits per dim.".format(state_len / num_dims))
+
+count = 0
+for i in range(1, len(init_state)):
+    if init_state[-i] == flat_state[-i]:
+        count += 1
+    else:
+        break
+init_cost = 32 * (len(init_state) - count)
+print(f'Initial cost: {init_cost} bits.')
+
+single_image_init_cost = model.init_cost_record / num_images
+print(f'Average initial cost/image: {single_image_init_cost}')
+print(f'Average initial cost/z dim: {single_image_init_cost / (np.prod(model.zdim) * model.n_blocks)}')
+print(f'Average initial cost/x dim: {single_image_init_cost / np.prod(model.xdim)}')
 
 extra_bits = state_len - 32 * cf_compress.initial_bits
-print('Exclude initial state length, Used {} bits.'.format(extra_bits))
+print('Exclude initial cost, Used {} bits.'.format(extra_bits))
 print('Net bit rate: {:.2f} bits per dim.'.format(extra_bits / num_dims))
+
+total_bits = extra_bits + init_cost
+print("Total used {} bits.".format(total_bits))
+print("Bit rate: {:.2f} bits per dim.".format(total_bits / num_dims))
 # *********************
 
 # *** decompression ***
@@ -119,10 +134,6 @@ print('All decoded in {:.2f}s'.format(decode_t))
 print("Average singe image decoding time: {:.2f}s.".format(decode_t / num_images))
 
 # check if decompressed_data == original
-# print('decoded_images')
-# print(decoded_images)
-# print('images')
-# print(images)
 assert len(images) == len(decoded_images), (len(images), len(decoded_images))
 for test_image, decoded_image in zip(images, decoded_images):
     np.testing.assert_equal(test_image, decoded_image)

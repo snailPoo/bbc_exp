@@ -42,6 +42,10 @@ class bbc_base:
         self.state, z_symtop = ANS(pmfs, self.z_quantbits).decode(self.state)
         return z_symtop
 
+# vANS mode Logistic_UnifBins, setting lb & ub manually
+# P(X > a) = 1 / [1 + (e^(a-mu) / scale)]
+# let t is threshold, ub = mu + ln(scale * (1/t - 1))
+# lb = mu - (ub - mu)
 # should customize encoding/decoding process based on latent variable dependency graph
 class BitSwap(bbc_base):
     def __init__(self, config, model, state, x_bin, z_bin):
@@ -191,6 +195,12 @@ def VAE(config, model):
     return BBANS(prior, likelihood, posterior)
 
 
+def get_init_cost(state):
+    state = list(state)
+    state[0] = np.concatenate((state[0][0].flatten(), state[0][1].flatten()))
+    state = tuple(state)
+    return len(cs.flatten(state))
+    
 def ResNetVAE(config, model):
     """
     Codec for a ResNetVAE.
@@ -290,7 +300,7 @@ def ResNetVAE(config, model):
         @torch.no_grad()
         def posterior_pop(state):
             # print('in posterior_pop')
-            # state_before_pop = cs.flatten(state)
+            state_len_before_pop = get_init_cost(state)
             latents = []
             # input initalization
             input = model.h.view(1, -1, 1, 1).expand((config.batch_size, 
@@ -365,10 +375,9 @@ def ResNetVAE(config, model):
             # print(f'train bpd:{bpd.item()}, p:{bpd_p.item()}, q:{bpd_q.item()}, x:{bpd_x.item()}')
             # print(f'real bpd:{bpd_true.item()}, p:{bpd_pt.item()}, q:{bpd_qt.item()}, x:{bpd_x.item()}')
             '''
-            # flat_state = cs.flatten(state)
-            # init_cost = 32 * (len(state_before_pop) - len(flat_state))
-            # print("Initial cost used {} bits.".format(init_cost))
-            # print("This is {:.2f} bits per dim.".format(init_cost / (np.prod(input) * model.n_blocks)))
+            state_len_after_pop = get_init_cost(state)
+            init_cost = 32 * (state_len_before_pop - state_len_after_pop)
+            model.init_cost_record += init_cost
             # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
             return state, (latents, input)
 
@@ -626,7 +635,7 @@ class SHVC_BitSwap_ANS():
             param = D_params[:, i,] # (B, 15, H/2, W/2)
             cdfs = mixture_discretized_logistic_cdf(self.batch_x_bin_ends, param, 5) # (B, H/2 * W/2, 255)
             pmfs = get_batch_pmfs(cdfs)
-            # self.state = ANS(pmfs, self.x_quantbits).encode(self.state, y) # batch execute ANS 
+            self.state = batch_ANS(pmfs, self.x_quantbits).encode(self.state, y) # batch execute ANS 
         
         x[:, int(self.model.s)+1:,] = 0
         data[:, int(self.model.s)+1:,] = 0
@@ -642,7 +651,7 @@ class SHVC_BitSwap_ANS():
             z_bin_ends = self.z_bin_ends[zi].t().unsqueeze(1).expand(-1, self.batch_size, -1)
             cdfs = logistic_cdf(z_bin_ends, mu, scale)
             pmfs = get_batch_pmfs(cdfs)
-            # self.state, z_next = ANS(pmfs, self.z_quantbits).decode(self.state)
+            self.state, z_next = batch_ANS(pmfs, self.z_quantbits).decode(self.state)
 
             given = self.z_bin_centres[zi, self.zrange, z_next] # z
             if zi == 0:
@@ -653,13 +662,13 @@ class SHVC_BitSwap_ANS():
                     param = D_params[:, i,] # (B, 15, H/2, W/2)
                     cdfs = mixture_discretized_logistic_cdf(self.batch_x_bin_ends, param, 5) # (B, H/2 * W/2, 255)
                     pmfs = get_batch_pmfs(cdfs)
-                    # self.state = ANS(pmfs, self.x_quantbits).encode(self.state, y) # batch execute ANS 
+                    self.state = batch_ANS(pmfs, self.x_quantbits).encode(self.state, y) # batch execute ANS 
             else:
                 mu, scale = self.model.generate(zi)(given=given)
                 z_bin_ends = self.z_bin_ends[zi - 1].t().unsqueeze(1).expand(-1, self.batch_size, -1)
                 cdfs = logistic_cdf(z_bin_ends, mu, scale)
                 pmfs = get_batch_pmfs(cdfs)
-                # self.state = ANS(pmfs, self.z_quantbits).encode(self.state, z)
+                self.state = batch_ANS(pmfs, self.z_quantbits).encode(self.state, z)
 
             z = z_next
 
