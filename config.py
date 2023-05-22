@@ -109,6 +109,13 @@ class Config_bitswap(object):
                 self.discretization_dir = f"bins/{self.model_name}/{self.dataset}"
                 self.discretization_batch_size = batch_size
                 self.discretization = posterior_sampling
+                # ------------ vANS -------------
+                self.bound_threshold = 1e-4
+                self.bin_prec = 10
+                self.obs_precision = 24
+                self.coding_prec = 18
+                self.batch_size = 1
+                self.initial_bits = int(1e5)#1e8  # if n_flif == 0 then use a random message with this many bits
                 
         self.compress_hparam = Compress_hparam(self.model_name, self.dataset, self.device, self.batch_size)
 
@@ -137,11 +144,11 @@ class Config_hilloc(object):
         class Model_hparam:
             def __init__(self, dataset):
                 if dataset == 'mnist':
-                    self.n_blocks = 2
+                    self.nz = 2
                     self.z_size = 28
                     self.h_size = 32
                 else:
-                    self.n_blocks = 24
+                    self.nz = 24
                     self.z_size = 32
                     self.h_size = 160
                 
@@ -162,7 +169,6 @@ class Config_hilloc(object):
                 self.q_precision = 18
                 self.batch_size = 1
                 self.device = device
-                self.compression_exclude_sizes = False
                 # self.n_flif = 0   # number of images to compress with FLIF to start the bb chain (bbans mode)
                 self.initial_bits = int(1e5)#1e8  # if n_flif == 0 then use a random message with this many bits
 
@@ -182,7 +188,7 @@ class Config_shvc(object):
         self.epochs = 1000
         self.lr = 9e-4#5e-4
         self.decay = 0.999#0.9961
-        self.batch_size = 256
+        self.batch_size = 16#256
 
         self.model_name = "shvc"
         self.bbc_scheme = 'bitswap'
@@ -192,9 +198,9 @@ class Config_shvc(object):
             def __init__(self):
                 self.nz = 3  # number of latent variables
                 self.zchannels = 32  # number of channels for the latent variables
-                self.nprocessing = 8  # number of processing layers
-                self.resdepth = 9  # number of ResNet blocks
-                self.reswidth = 254  # number of channels in the convolutions in the ResNet blocks
+                self.nprocessing = 3#8  # number of processing layers
+                self.resdepth = 6#9  # number of ResNet blocks
+                self.reswidth = 64#254  # number of channels in the convolutions in the ResNet blocks
                 self.kernel_size = 3  # size of the convolutional filter (kernel) in the ResNet blocks
                 self.dropout_p = 0.2
                 self.lamb = 0.01

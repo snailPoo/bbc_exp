@@ -123,11 +123,13 @@ def load_model(model_name, model_pt, hparam, lr, decay):
 
     return model, optimizer, scheduler
 
-from codec.bbc_scheme import VAE, ResNetVAE, SHVC_BitSwap
+from codec.bbc_scheme import VAE, BitSwap_vANS, ResNetVAE, SHVC_BitSwap_ANS
 def load_scheme(model_name, cf, model):
     if model_name == 'bbans':
         return VAE(cf, model)
+    elif model_name == 'bitswap':
+        return BitSwap_vANS(cf, model)
     elif model_name == 'hilloc':
         return ResNetVAE(cf, model)
     elif model_name == 'shvc':
-        return SHVC_BitSwap(cf, model)
+        return SHVC_BitSwap_ANS(cf, model)

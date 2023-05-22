@@ -194,6 +194,144 @@ def VAE(config, model):
                         z_view)
     return BBANS(prior, likelihood, posterior)
 
+def BitSwap_vANS(config, model):
+    t = config.bound_threshold
+    coding_prec = config.coding_prec
+    bin_prec = config.bin_prec
+    obs_precision = config.obs_precision
+
+    z_view = lambda head: head[0]
+    x_view = lambda head: head[1]
+
+    device = config.device
+
+    def to_tensor(x):
+        return torch.from_numpy(x.astype(np.float32)).to(device)
+    
+    def push(state, data):
+        data = (data - 127.5) / 127.5
+        x = to_tensor(data)
+        state_len_before_pop = get_init_cost(state)
+        for zi in range(model.nz):
+            mu, scale = model.infer(zi)(given=x if zi == 0 else to_tensor(z))
+            # pmfs = get_pmfs(self.z_bin_ends[zi].t(), mu, scale)
+            # self.state, z_symtop = ANS(pmfs, self.z_quantbits).decode(self.state)     
+
+            # vANS mode Logistic_UnifBins, setting lb & ub manually
+            # P(X > a) = 1 / [1 + (e^(a-mu) / scale)]
+            ub = mu + torch.log(scale * (1/t - 1))
+            lb = mu - (ub - mu)
+            codec = cs.Logistic_UnifBins(mu.detach().cpu().numpy(), 
+                                         torch.log(scale).detach().cpu().numpy(),
+                                         coding_prec, bin_prec,
+                                         bin_lb=torch.min(lb).item(), 
+                                         bin_ub=torch.max(ub).item())
+            posterior = substack(codec, z_view)
+            state, z_next = posterior.pop(state)
+            
+            if zi == 0:
+                state_len_after_pop = get_init_cost(state)
+                init_cost = 32 * (state_len_before_pop - state_len_after_pop)
+                model.init_cost_record += init_cost
+                
+                mu, scale = model.generate(zi)(given=to_tensor(z_next))
+                # pmfs = get_pmfs(self.x_bin_ends.t(), mu, scale)
+                # self.state = ANS(pmfs, self.x_quantbits).encode(self.state, x.long())
+                codec = cs.Logistic_UnifBins(mu.detach().cpu().numpy(), 
+                                             torch.log(scale).detach().cpu().numpy(),
+                                             obs_precision, bin_prec=8,
+                                             bin_lb=-1, bin_ub=1)
+                likelihood = substack(codec, x_view)
+                state, = likelihood.push(state, data)
+
+            else:
+                mu, scale = model.generate(zi)(given=to_tensor(z_next))
+                # pmfs = get_pmfs(self.z_bin_ends[zi - 1].t(), mu, scale)
+                # self.state = ANS(pmfs, self.z_quantbits).encode(self.state, z_sym)
+
+                ub = mu + torch.log(scale * (1/t - 1))
+                lb = mu - (ub - mu)
+                codec = cs.Logistic_UnifBins(mu.detach().cpu().numpy(), 
+                                             torch.log(scale).detach().cpu().numpy(),
+                                             coding_prec, bin_prec,
+                                             bin_lb=torch.min(lb).item(), 
+                                             bin_ub=torch.max(ub).item())
+                likelihood = substack(codec, z_view)
+                state, = likelihood.push(state, z)
+
+            z = z_next
+
+        # encode prior
+        # pmfs = get_pmfs(self.z_bin_ends[-1].t(), self.prior_mu, self.prior_scale)
+        # self.state = ANS(pmfs, self.z_quantbits).encode(self.state, z_symtop)
+        mu = 0
+        scale = 1
+        ub = mu + np.log(scale * (1/t - 1))
+        lb = mu - (ub - mu)
+        codec = cs.Logistic_UnifBins(mu, np.log(scale),
+                                     coding_prec, bin_prec,
+                                     bin_lb=lb, bin_ub=ub)
+        prior = substack(codec, z_view)
+        state, = prior.push(state, z)
+    
+        return state, 
+    
+    def pop(state):
+        mu = 0
+        scale = 1
+        ub = mu + np.log(scale * (1/t - 1))
+        lb = mu - (ub - mu)
+        codec = cs.Logistic_UnifBins(mu, np.log(scale),
+                                     coding_prec, bin_prec,
+                                     bin_lb=lb, bin_ub=ub)
+        prior = substack(codec, z_view)
+        state, z_next = prior.pop(state)
+
+        for zi in reversed(range(model.nz)):
+            if zi == 0:
+                mu, scale = model.generate(zi)(given=to_tensor(z_next))
+                # pmfs = get_pmfs(self.x_bin_ends.t(), mu, scale)
+                # self.state = ANS(pmfs, self.x_quantbits).encode(self.state, x.long())
+                codec = cs.Logistic_UnifBins(mu.detach().cpu().numpy(), 
+                                             torch.log(scale).detach().cpu().numpy(),
+                                             obs_precision, bin_prec=8,
+                                             bin_lb=-1, bin_ub=1)
+                likelihood = substack(codec, x_view)
+                state, data = likelihood.pop(state)
+
+            else:
+                mu, scale = model.generate(zi)(given=to_tensor(z_next))
+                # pmfs = get_pmfs(self.z_bin_ends[zi - 1].t(), mu, scale)
+                # self.state = ANS(pmfs, self.z_quantbits).encode(self.state, z_sym)
+
+                ub = mu + torch.log(scale * (1/t - 1))
+                lb = mu - (ub - mu)
+                codec = cs.Logistic_UnifBins(mu.detach().cpu().numpy(), 
+                                             torch.log(scale).detach().cpu().numpy(),
+                                             coding_prec, bin_prec,
+                                             bin_lb=torch.min(lb).item(), 
+                                             bin_ub=torch.max(ub).item())
+                likelihood = substack(codec, z_view)
+                state, z = likelihood.pop(state)
+
+            mu, scale = model.infer(zi)(given=x if zi == 0 else to_tensor(z))
+            ub = mu + torch.log(scale * (1/t - 1))
+            lb = mu - (ub - mu)
+            codec = cs.Logistic_UnifBins(mu.detach().cpu().numpy(), 
+                                         torch.log(scale).detach().cpu().numpy(),
+                                         coding_prec, bin_prec,
+                                         bin_lb=torch.min(lb).item(), 
+                                         bin_ub=torch.max(ub).item())
+            posterior = substack(codec, z_view)
+            state, = posterior.push(state, z_next)
+
+            z_next = z
+
+        data = data * 127.5 + 127.5
+
+        return state, data
+
+    return cs.Codec(push, pop)
 
 def get_init_cost(state):
     state = list(state)

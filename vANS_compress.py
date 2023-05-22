@@ -12,7 +12,7 @@ from config import *
 from utils.common import load_data, load_model, load_scheme, same_seed
 
 
-cf = Config_hilloc() # Config_bbans # Config_hilloc # Config_shvc
+cf = Config_bitswap() # Config_bbans # Config_bitswap # Config_hilloc # Config_shvc
 cf_compress = cf.compress_hparam
 cf_model = cf.model_hparam
 
@@ -24,7 +24,7 @@ print(f"Model:{cf.model_name}; Dataset:{cf.dataset}")
 _, test_set = load_data(cf.dataset, cf.model_name, load_train=False)
 cf_model.xdim = test_set[0][0].shape
 
-num_images = len(test_set)
+num_images = 10#len(test_set)
 batch_size = cf_compress.batch_size
 n_batches = num_images // batch_size
 
@@ -85,7 +85,7 @@ init_head_shape = (np.prod(codec_shape) + np.prod(latent_shape),)
 state = cs.reshape_head(state, init_head_shape)
 
 init_t = time.time() - init_t0
-print("Initialization time: {:.2f}s".format(init_t))
+print("Initialization time: {:.4f}s".format(init_t))
 # *********************
 
 # **** compression ****
@@ -93,8 +93,8 @@ print("Start Encoding.")
 encode_t0 = time.time()
 state, = vae_push(state, images)
 encode_t = time.time() - encode_t0
-print("All encoded in {:.2f}s".format(encode_t))
-print("Average singe image encoding time: {:.2f}s.".format(encode_t / num_images))
+print("All encoded in {:.4f}s".format(encode_t))
+print("Average singe image encoding time: {:.4f}s.".format(encode_t / num_images))
 
 flat_state = cs.flatten(state)
 state_len = 32 * len(flat_state)
@@ -109,17 +109,17 @@ init_cost = 32 * (len(init_state) - count)
 print(f'Initial cost: {init_cost} bits.')
 
 single_image_init_cost = model.init_cost_record / num_images
-print(f'Average initial cost/image: {single_image_init_cost}')
-print(f'Average initial cost/z dim: {single_image_init_cost / (np.prod(model.zdim) * model.n_blocks)}')
-print(f'Average initial cost/x dim: {single_image_init_cost / np.prod(model.xdim)}')
+print('Average initial cost/image: {:.4f}'.format(single_image_init_cost))
+print('Average initial cost/z dim: {:.4f}'.format(single_image_init_cost / (np.prod(model.zdim) * model.nz)))
+print('Average initial cost/x dim: {:.4f}'.format(single_image_init_cost / np.prod(model.xdim)))
 
 extra_bits = state_len - 32 * cf_compress.initial_bits
 print('Exclude initial cost, Used {} bits.'.format(extra_bits))
-print('Net bit rate: {:.2f} bits per dim.'.format(extra_bits / num_dims))
+print('Net bit rate: {:.4f} bits per dim.'.format(extra_bits / num_dims))
 
 total_bits = extra_bits + init_cost
 print("Total used {} bits.".format(total_bits))
-print("Bit rate: {:.2f} bits per dim.".format(total_bits / num_dims))
+print("Bit rate: {:.4f} bits per dim.".format(total_bits / num_dims))
 # *********************
 
 # *** decompression ***
@@ -130,8 +130,8 @@ state, decoded_images = vae_pop(state)
 state = cs.reshape_head(state, (1,))
 
 decode_t = time.time() - decode_t0
-print('All decoded in {:.2f}s'.format(decode_t))
-print("Average singe image decoding time: {:.2f}s.".format(decode_t / num_images))
+print('All decoded in {:.4f}s'.format(decode_t))
+print("Average singe image decoding time: {:.4f}s.".format(decode_t / num_images))
 
 # check if decompressed_data == original
 assert len(images) == len(decoded_images), (len(images), len(decoded_images))
