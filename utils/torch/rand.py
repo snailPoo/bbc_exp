@@ -23,7 +23,7 @@ def sample_from_logistic(mu, scale, shape, device, bound=1e-5):
 #     _y = -(x - mu) / scale
 #     logp = -_y - torch.log(scale) - 2 * modules.softplus(-_y)
 #     return logp # (B, C, H, W)
-def logistic_logp(mean, scale, binsize=1 / 256.0, sample=None):
+def logistic_logp(mean, scale, binsize=1 / 1024.0, sample=None):
     sample = (torch.floor(sample / binsize) * binsize - mean) / scale
     logp = torch.log(torch.sigmoid(sample + binsize / scale) - torch.sigmoid(sample) + 1e-7)
     return logp

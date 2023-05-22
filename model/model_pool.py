@@ -116,7 +116,6 @@ class ResNet_VAE(nn.Module):
         # if activated, tensors will be flattened
         self.compressing = False
         self.init_cost_record = 0
-        self.z_binsize = 1 / 1024.
         self.logger = None
         self.global_step = 0
         
@@ -549,7 +548,7 @@ class ResNet_VAE(nn.Module):
 
             # store the inference model loss
             zsamples[i] = z_next.flatten(1)
-            logq = torch.sum(random.logistic_logp(mu, scale, self.z_binsize, z_next), dim=(2, 3)) # (B, C, H, W) -> (B, C)
+            logq = torch.sum(random.logistic_logp(mu, scale, z_next), dim=(2, 3)) # (B, C, H, W) -> (B, C)
             logenc[i] += logq
 
             # generative model
@@ -563,13 +562,13 @@ class ResNet_VAE(nn.Module):
                 logrecon = logp
 
             else:
-                logp = torch.sum(random.logistic_logp(mu, scale, self.z_binsize, z), dim=(2, 3))
+                logp = torch.sum(random.logistic_logp(mu, scale, z), dim=(2, 3))
                 logdec[i - 1] += logp
 
             z = z_next
 
         # store the prior loss
-        logp = torch.sum(random.logistic_logp(torch.zeros(1, device=x.device), torch.ones(1, device=x.device), self.z_binsize, z), dim=(2, 3))
+        logp = torch.sum(random.logistic_logp(torch.zeros(1, device=x.device), torch.ones(1, device=x.device), z), dim=(2, 3))
         logdec[self.nz - 1] += logp
 
         # convert from "nats" to bits
