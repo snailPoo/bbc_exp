@@ -87,8 +87,11 @@ def load_data(dataset, model_name, load_train=True):
     elif dataset == "imagenet" or dataset == "imagenet_full":
         if load_train:
             train_set = ImageNetDataset('./data/imagenet/train_32', transform=transform)
-        test_set  = ImageNetDataset('./data/imagenet/val_32'  , transform=transform)
-    
+        test_set  = ImageNetDataset('./data/imagenet/val_32', transform=transform)
+
+    elif dataset == "imagenet64":
+        test_set  = ImageNetDataset('./data/imagenet/val_64', data_shape=(64, 64, 3), transform=transform)
+
     elif dataset == "mnist":
         if model_name == 'bitswap' or model_name == 'shvc':
             transform = transform_28
