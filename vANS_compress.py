@@ -9,24 +9,28 @@ import os
 import pickle
 
 from config import *
-from utils.common import load_data, load_model, load_scheme, same_seed
+from utils.common import load_data, load_model, load_scheme, same_seed, extract_blocks
 
 
-cf = Config_bitswap() # Config_bbans # Config_bitswap # Config_hilloc # Config_shvc
+cf = Config_bbans() # Config_bbans # Config_bitswap # Config_hilloc # Config_shvc
 cf_compress = cf.compress_hparam
 cf_model = cf.model_hparam
 
 same_seed(cf.seed)
 
-print(f"Model:{cf.model_name}; Dataset:{cf.dataset}")
+if cf_compress.general_test:
+    dataset = cf_compress.general_test_dataset
+else:
+    dataset = cf.dataset
+
+print(f"Model:{cf.model_name}; Dataset:{dataset}")
 
 # ******* data ********
-_, test_set = load_data(cf.dataset, cf.model_name, load_train=False)
+_, test_set = load_data(dataset, cf.model_name, load_train=False)
 cf_model.xdim = test_set[0][0].shape
 
-num_images = 10#len(test_set)
+num_images = len(test_set)
 batch_size = cf_compress.batch_size
-n_batches = num_images // batch_size
 
 # **********************
 test_loader = DataLoader(
@@ -35,11 +39,16 @@ test_loader = DataLoader(
 
 images = []
 for i, x in enumerate(test_loader):
-    if i == n_batches:
+    if i == num_images:
         break
-    images.append(x[0].numpy().astype(np.uint64))
+    x_ = x[0].numpy().astype(np.uint64)
+    if cf_compress.general_test:
+        images.extend(extract_blocks(x_))
+    else:
+        images.append(x_)
 
-num_dims = num_images * np.prod(cf_model.xdim)
+n_batches = len(images) // batch_size
+num_dims = len(images) * np.prod(cf_model.xdim)
 print(f'num data: {len(images)} x {images[0].shape}')
 # *********************
 

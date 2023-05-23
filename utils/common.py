@@ -54,6 +54,19 @@ class ImageNetDataset(Dataset):
         label = -1
         return (x, label)
 
+def extract_blocks(arr, block_size=(32, 32)):
+    _h, _w = block_size
+    b, c, h, w = arr.shape
+    if h % _h != 0:
+        h -= h % _h
+        arr = arr[:,:,:h]
+    if w % _w != 0:
+        w -= w % _w
+        arr = arr[:,:,:,:w]
+    arr = arr.reshape(b, c, h//_h, _h, -1, _w)
+    arr = arr.swapaxes(3,4).reshape(b, c, -1, _h, _w)
+    arr = arr.swapaxes(1,2).reshape(b * (h//_h) * (w//_w), c, _h, _w)
+    return np.split(arr, arr.shape[0], 0)
 
 # create class that scales up the data to [0,255] if called
 class ToInt:

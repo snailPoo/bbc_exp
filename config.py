@@ -9,7 +9,7 @@ class Config_bbans(object):
         self.log_interval = 100
         self.eval_freq = 2
 
-        self.device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.dataset = 'imagenet_full'#'cifar'#'mnist'#'imagenet'#'imagenet_full'
 
         self.warmup = False
@@ -43,6 +43,8 @@ class Config_bbans(object):
                 self.batch_size = 1
                 self.initial_bits = int(1e5)
                 self.device = device
+                self.general_test = True
+                self.general_test_dataset = 'cifar'#'cifar'#'imagenet64'#'imagenet_uncrop'
 
         self.compress_hparam = Compress_hparam(self.device)
 
@@ -110,13 +112,16 @@ class Config_bitswap(object):
                 self.discretization_batch_size = batch_size
                 self.discretization = posterior_sampling
                 # ------------ vANS -------------
-                self.bound_threshold = 1e-4
+                self.bound_threshold = 1e-10
                 self.bin_prec = 10
                 self.obs_precision = 24
                 self.coding_prec = 18
                 self.batch_size = 1
                 self.initial_bits = int(1e5)#1e8  # if n_flif == 0 then use a random message with this many bits
-                
+                # -------------------------------
+                self.general_test = False
+                self.general_test_dataset = ''#'cifar'#'imagenet64'#'imagenet_uncrop
+
         self.compress_hparam = Compress_hparam(self.model_name, self.dataset, self.device, self.batch_size)
 
 
@@ -171,6 +176,8 @@ class Config_hilloc(object):
                 self.device = device
                 # self.n_flif = 0   # number of images to compress with FLIF to start the bb chain (bbans mode)
                 self.initial_bits = int(1e5)#1e8  # if n_flif == 0 then use a random message with this many bits
+                self.general_test = False
+                self.general_test_dataset = ''#'cifar'#'imagenet64'#'imagenet_uncrop
 
         self.compress_hparam = Compress_hparam(self.device)
 
@@ -233,5 +240,7 @@ class Config_shvc(object):
                 self.discretization_dir = f"bins/{self.model_name}/{self.dataset}"
                 self.discretization_batch_size = batch_size
                 self.discretization = posterior_sampling
+                self.general_test = False
+                self.general_test_dataset = ''#'cifar'#'imagenet64'#'imagenet_uncrop
                 
         self.compress_hparam = Compress_hparam(self.model_name, self.dataset, self.device, self.batch_size)

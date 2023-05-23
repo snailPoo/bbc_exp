@@ -156,6 +156,44 @@ from craystack.codecs import substack, Uniform, \
     std_gaussian_centres, DiagGaussian_StdBins
 from utils.distributions import generate_beta_binomial_probs
 
+# def VAE(config, model):
+#     """
+#     This codec uses the BB-ANS algorithm to code data which is distributed
+#     according to a variational auto-encoder (VAE) model. It is assumed that the
+#     VAE uses an isotropic Gaussian prior and diagonal Gaussian for its
+#     posterior.
+#     """
+#     prior_prec = config.prior_precision
+#     latent_prec = config.q_precision
+#     obs_precision = config.obs_precision
+
+#     z_view = lambda head: head[0]
+#     x_view = lambda head: head[1]
+
+#     prior = substack(Uniform(prior_prec), z_view)
+#     prior_inv_cdf = std_gaussian_centres(prior_prec)
+
+#     device = config.device
+
+#     @torch.no_grad()
+#     def likelihood(latent_idxs):
+#         z = prior_inv_cdf[latent_idxs]
+#         x_alpha, x_beta = model.decode(torch.from_numpy(z.astype(np.float32)).to(device))
+#         x = (x_alpha.view((config.batch_size,)+model.xdim), x_beta.view((config.batch_size,)+model.xdim))
+#         obs_codec = lambda x: cs.Categorical(generate_beta_binomial_probs(*x, torch.tensor(255)), obs_precision)
+#         return substack(obs_codec(x), x_view)
+    
+#     @torch.no_grad()
+#     def posterior(data):
+#         x = torch.from_numpy(data.astype(np.float32)).to(device)
+#         post_mean, post_stdd = model.encode(x)
+#         return substack(DiagGaussian_StdBins(
+#                             post_mean.cpu().numpy(), 
+#                             post_stdd.cpu().numpy(), 
+#                             latent_prec, prior_prec), 
+#                         z_view)
+#     return BBANS(prior, likelihood, posterior)
+
 def VAE(config, model):
     """
     This codec uses the BB-ANS algorithm to code data which is distributed
@@ -172,6 +210,7 @@ def VAE(config, model):
 
     prior = substack(Uniform(prior_prec), z_view)
     prior_inv_cdf = std_gaussian_centres(prior_prec)
+    prior_push, prior_pop = prior
 
     device = config.device
 
@@ -192,7 +231,29 @@ def VAE(config, model):
                             post_stdd.cpu().numpy(), 
                             latent_prec, prior_prec), 
                         z_view)
-    return BBANS(prior, likelihood, posterior)
+
+    def push(message, data):
+        _, posterior_pop = posterior(data)
+        state_len_before_pop = get_init_cost(message)
+        message, latent = posterior_pop(message)
+        state_len_after_pop = get_init_cost(message)
+        init_cost = 32 * (state_len_before_pop - state_len_after_pop)
+        model.init_cost_record += init_cost
+        likelihood_push, _ = likelihood(latent)
+        message, = likelihood_push(message, data)
+        message, = prior_push(message, latent)
+        return message,
+
+    def pop(message):
+        message, latent = prior_pop(message)
+        likelihood_pop = likelihood(latent).pop
+        message, data = likelihood_pop(message)
+        posterior_push = posterior(data).push
+        message, = posterior_push(message, latent)
+        return message, data
+
+    return cs.Codec(push, pop)
+
 
 def BitSwap_vANS(config, model):
     t = config.bound_threshold
@@ -222,7 +283,7 @@ def BitSwap_vANS(config, model):
             ub = mu + torch.log(scale * (1/t - 1))
             lb = mu - (ub - mu)
             codec = cs.Logistic_UnifBins(mu.detach().cpu().numpy(), 
-                                         torch.log(scale).detach().cpu().numpy(),
+                                         np.log(scale.detach().cpu().numpy()),
                                          coding_prec, bin_prec,
                                          bin_lb=torch.min(lb).item(), 
                                          bin_ub=torch.max(ub).item())
@@ -233,12 +294,12 @@ def BitSwap_vANS(config, model):
                 state_len_after_pop = get_init_cost(state)
                 init_cost = 32 * (state_len_before_pop - state_len_after_pop)
                 model.init_cost_record += init_cost
-                
+
                 mu, scale = model.generate(zi)(given=to_tensor(z_next))
                 # pmfs = get_pmfs(self.x_bin_ends.t(), mu, scale)
                 # self.state = ANS(pmfs, self.x_quantbits).encode(self.state, x.long())
                 codec = cs.Logistic_UnifBins(mu.detach().cpu().numpy(), 
-                                             torch.log(scale).detach().cpu().numpy(),
+                                             np.log(scale.detach().cpu().numpy()),
                                              obs_precision, bin_prec=8,
                                              bin_lb=-1, bin_ub=1)
                 likelihood = substack(codec, x_view)
@@ -252,7 +313,7 @@ def BitSwap_vANS(config, model):
                 ub = mu + torch.log(scale * (1/t - 1))
                 lb = mu - (ub - mu)
                 codec = cs.Logistic_UnifBins(mu.detach().cpu().numpy(), 
-                                             torch.log(scale).detach().cpu().numpy(),
+                                             np.log(scale.detach().cpu().numpy()),
                                              coding_prec, bin_prec,
                                              bin_lb=torch.min(lb).item(), 
                                              bin_ub=torch.max(ub).item())
@@ -293,7 +354,7 @@ def BitSwap_vANS(config, model):
                 # pmfs = get_pmfs(self.x_bin_ends.t(), mu, scale)
                 # self.state = ANS(pmfs, self.x_quantbits).encode(self.state, x.long())
                 codec = cs.Logistic_UnifBins(mu.detach().cpu().numpy(), 
-                                             torch.log(scale).detach().cpu().numpy(),
+                                             np.log(scale.detach().cpu().numpy()),
                                              obs_precision, bin_prec=8,
                                              bin_lb=-1, bin_ub=1)
                 likelihood = substack(codec, x_view)
@@ -307,7 +368,7 @@ def BitSwap_vANS(config, model):
                 ub = mu + torch.log(scale * (1/t - 1))
                 lb = mu - (ub - mu)
                 codec = cs.Logistic_UnifBins(mu.detach().cpu().numpy(), 
-                                             torch.log(scale).detach().cpu().numpy(),
+                                             np.log(scale.detach().cpu().numpy()),
                                              coding_prec, bin_prec,
                                              bin_lb=torch.min(lb).item(), 
                                              bin_ub=torch.max(ub).item())
@@ -318,7 +379,7 @@ def BitSwap_vANS(config, model):
             ub = mu + torch.log(scale * (1/t - 1))
             lb = mu - (ub - mu)
             codec = cs.Logistic_UnifBins(mu.detach().cpu().numpy(), 
-                                         torch.log(scale).detach().cpu().numpy(),
+                                         np.log(scale.detach().cpu().numpy()),
                                          coding_prec, bin_prec,
                                          bin_lb=torch.min(lb).item(), 
                                          bin_ub=torch.max(ub).item())
