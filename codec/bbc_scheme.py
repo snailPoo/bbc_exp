@@ -14,8 +14,6 @@ class bbc_base:
         self.zrange = torch.arange(np.prod(model.zdim))
         self.z_quantbits = config.z_quantbits
         self.x_quantbits = config.x_quantbits
-        self.restbits = None
-        self.restbits_tag = True
         self.total_xdim = np.prod(self.model.xdim)
         self.prior_mu = torch.zeros(1, device=config.device, dtype=config.type)
         self.prior_scale = torch.ones(1, device=config.device, dtype=config.type)
@@ -42,10 +40,6 @@ class bbc_base:
         self.state, z_symtop = ANS(pmfs, self.z_quantbits).decode(self.state)
         return z_symtop
 
-# vANS mode Logistic_UnifBins, setting lb & ub manually
-# P(X > a) = 1 / [1 + (e^(a-mu) / scale)]
-# let t is threshold, ub = mu + ln(scale * (1/t - 1))
-# lb = mu - (ub - mu)
 # should customize encoding/decoding process based on latent variable dependency graph
 class BitSwap(bbc_base):
     def __init__(self, config, model, state, x_bin, z_bin):
@@ -53,16 +47,12 @@ class BitSwap(bbc_base):
         super().__init__(config, model, state, x_bin, z_bin)
 
     def encoding(self, x):
+        init_state = self.state.copy()
+
         x = x.view(self.total_xdim)
         for zi in range(self.model.nz):
             given = self.z_bin_centres[zi - 1, self.zrange, z_sym] if zi > 0 else self.x_bin_centres[self.xrange, x.long()]
-            z_symtop = self.variable_decode('inf', zi, given, self.z_bin_ends[zi], self.z_quantbits)
-            
-            # save excess bits for calculations
-            if self.restbits_tag:
-                self.restbits = self.state.copy()
-                assert len(self.restbits) > 1, "too few initial bits" # otherwise initial state consists of too few bits
-                self.restbits_tag = False            
+            z_symtop = self.variable_decode('inf', zi, given, self.z_bin_ends[zi], self.z_quantbits)       
 
             given = self.z_bin_centres[zi, self.zrange, z_symtop] # z
             if zi == 0:
@@ -74,6 +64,17 @@ class BitSwap(bbc_base):
 
         # encode prior
         self.prior_encode(z_symtop, self.z_bin_ends[-1])
+
+        count = 0
+        for i in range(len(init_state)):
+            if init_state[i] == self.state[i]:
+                count += 1
+            else:
+                break
+        
+        init_cost = 32 * (len(init_state) - count)
+        self.model.init_cost_record += init_cost
+
         return self.state
     
     def decoding(self):
@@ -108,12 +109,6 @@ class BBC(bbc_base):
             z_symtop = self.variable_decode('inf', zi, given, self.z_bin_ends[zi], self.z_quantbits)
             zs.append(z_symtop)
             z_sym = z_symtop
-
-        # save excess bits for calculations
-        if self.restbits_tag:
-            self.restbits = self.state.copy()
-            assert len(self.restbits) > 1, "too few initial bits" # otherwise initial state consists of too few bits
-            self.restbits_tag = False
 
         # decode latent variables and data x
         for zi in range(self.model.nz):

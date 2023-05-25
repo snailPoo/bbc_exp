@@ -27,7 +27,6 @@ print(f"Model:{cf.model_name}; Dataset:{dataset}")
 
 # ******* data ********
 _, test_set = load_data(dataset, cf.model_name, load_train=False)
-cf_model.xdim = test_set[0][0].shape
 
 num_images = len(test_set)
 batch_size = cf_compress.batch_size
@@ -42,11 +41,12 @@ for i, x in enumerate(test_loader):
     if i == num_images:
         break
     x_ = x[0].numpy().astype(np.uint64)
-    if cf_compress.general_test:
+    if cf_compress.general_test and x[0].shape[-1] > 32:
         images.extend(extract_blocks(x_))
     else:
         images.append(x_)
 
+cf_model.xdim = images[0].shape[1:]
 n_batches = len(images) // batch_size
 num_dims = len(images) * np.prod(cf_model.xdim)
 print(f'num data: {len(images)} x {images[0].shape}')

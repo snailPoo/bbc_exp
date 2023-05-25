@@ -149,28 +149,17 @@ def beta_latent_ppf(
 # ----------------------------------------------------------------------------
 # Bits back append and pop
 # ----------------------------------------------------------------------------
-def bb_ans_append(post_pop, lik_append, prior_append):
-    def append(state, data):
-        state, latent = post_pop(data)(state)
-        state = lik_append(latent)(state, data)
-        state = prior_append(state, latent)
-        return state
-    return append
-
-def bb_ans_pop(prior_pop, lik_pop, post_append):
-    def pop(state):
-        state, latent = prior_pop(state)
-        state, data = lik_pop(latent)(state)
-        state = post_append(data)(state, latent)
-        return state, data
-    return pop
-
-def vae_append(latent_shape, gen_net, rec_net, obs_append, prior_prec=8,
+def vae_append(latent_shape, model, obs_append, prior_prec=8,
                latent_prec=12):
     """
     Assume that the vae uses an isotropic Gaussian for its prior and diagonal
     Gaussian for its posterior.
     """
+    rec_net = torch_fun_to_numpy_fun(model.encode)
+    gen_net = torch_fun_to_numpy_fun(model.decode)
+
+    prior_append = uniforms_append(prior_prec)
+
     def post_pop(data):
         post_mean, post_stdd = rec_net(data)
         post_mean, post_stdd = np.ravel(post_mean), np.ravel(post_stdd)
@@ -185,15 +174,29 @@ def vae_append(latent_shape, gen_net, rec_net, obs_append, prior_prec=8,
         obs_params = gen_net(np.reshape(y, latent_shape))
         return obs_append(obs_params)
 
-    prior_append = uniforms_append(prior_prec)
+    def bb_ans_append(post_pop, lik_append, prior_append):
+        def append(state, data):
+            state_len_before_pop = len(rans.flatten(state))
+            state, latent = post_pop(data)(state)
+            state_len_after_pop = len(rans.flatten(state))
+            init_cost = 32 * (state_len_before_pop - state_len_after_pop)
+            model.init_cost_record += init_cost
+            state = lik_append(latent)(state, data)
+            state = prior_append(state, latent)
+            return state
+        return append
+
     return bb_ans_append(post_pop, lik_append, prior_append)
 
 def vae_pop(
-        latent_shape, gen_net, rec_net, obs_pop, prior_prec=8, latent_prec=12):
+        latent_shape, model, obs_pop, prior_prec=8, latent_prec=12):
     """
     Assume that the vae uses an isotropic Gaussian for its prior and diagonal
     Gaussian for its posterior.
     """
+    rec_net = torch_fun_to_numpy_fun(model.encode)
+    gen_net = torch_fun_to_numpy_fun(model.decode)
+
     prior_pop = uniforms_pop(prior_prec, np.prod(latent_shape))
 
     def lik_pop(latent_idxs):
@@ -207,6 +210,14 @@ def vae_pop(
         cdfs = [gaussian_latent_cdf(m, s, prior_prec, latent_prec)
                 for m, s in zip(post_mean, post_stdd)]
         return non_uniforms_append(latent_prec, cdfs)
+
+    def bb_ans_pop(prior_pop, lik_pop, post_append):
+        def pop(state):
+            state, latent = prior_pop(state)
+            state, data = lik_pop(latent)(state)
+            state = post_append(data)(state, latent)
+            return state, data
+        return pop
 
     return bb_ans_pop(prior_pop, lik_pop, post_append)
 

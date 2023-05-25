@@ -19,14 +19,14 @@ def sample_from_logistic(mu, scale, shape, device, bound=1e-5):
     return sample
 
 # function to calculate the log-probability of x under a Logistic(mu, scale) distribution
-# def logistic_logp(mu, scale, x):
-#     _y = -(x - mu) / scale
-#     logp = -_y - torch.log(scale) - 2 * modules.softplus(-_y)
-#     return logp # (B, C, H, W)
-def logistic_logp(mean, scale, binsize=1 / 1024.0, sample=None):
-    sample = (torch.floor(sample / binsize) * binsize - mean) / scale
-    logp = torch.log(torch.sigmoid(sample + binsize / scale) - torch.sigmoid(sample) + 1e-7)
-    return logp
+def logistic_logp(mu, scale, x):
+    _y = -(x - mu) / scale
+    logp = -_y - torch.log(scale) - 2 * modules.softplus(-_y)
+    return logp # (B, C, H, W)
+# def logistic_logp(mean, scale, binsize=1 / 1024.0, sample=None):
+#     sample = (torch.floor(sample / binsize) * binsize - mean) / scale
+#     logp = torch.log(torch.sigmoid(sample + binsize / scale) - torch.sigmoid(sample) + 1e-7)
+#     return logp
 
 # function to calculate the log-probability of x under a discretized Logistic(mu, scale) distribution
 # heavily based on discretized_mix_logistic_loss() in https://github.com/openai/pixel-cnn

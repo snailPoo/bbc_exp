@@ -37,7 +37,6 @@ class Codec:
         self.model = model
         self.train_loader, self.test_loader = dataloader
         self.state = state
-        self.initialstate = self.state.copy()
         self.decoded_data = []
         
         self.total_xdim = np.prod(self.model.xdim)
@@ -49,13 +48,11 @@ class Codec:
         self.num_data = num_images
 
     def compress(self):
-        reswidth = 252 # why?
-
-        # metrics for the results
-        nets  = np.zeros((self.num_data, ), dtype=np.float64)
-        elbos = np.zeros((self.num_data, ), dtype=np.float64)
-        cma   = np.zeros((self.num_data, ), dtype=np.float64)
-        total = np.zeros((self.num_data, ), dtype=np.float64)
+        # # metrics for the results
+        # nets  = np.zeros((self.num_data, ), dtype=np.float64)
+        # elbos = np.zeros((self.num_data, ), dtype=np.float64)
+        # cma   = np.zeros((self.num_data, ), dtype=np.float64)
+        # total = np.zeros((self.num_data, ), dtype=np.float64)
 
         print("Start compressing images")
         self.model.compress_mode(True)
@@ -69,10 +66,10 @@ class Codec:
             x = x.to(self.cf.device)#.view(self.total_xdim)
 
             # calculate ELBO
-            with torch.no_grad():
-                self.model.compress_mode(False)
-                elbo, _ = self.model.loss(x, 'compress') # x.view((-1,) + self.model.xdim)
-                self.model.compress_mode(True)
+            # with torch.no_grad():
+            #     self.model.compress_mode(False)
+            #     elbo, _ = self.model.loss(x, 'compress') # x.view((-1,) + self.model.xdim)
+            #     self.model.compress_mode(True)
 
             if self.cf.bbc_scheme == 'bitswap':
                 if self.cf.model_name == 'shvc':
@@ -85,19 +82,19 @@ class Codec:
             self.state = scheme.encoding(x)
 
             # calculating bits
-            total_added_bits = (len(self.state) - len(self.initialstate)) * 32
-            totalbits = (len(self.state) - (len(scheme.restbits) - 1)) * 32
+            # total_added_bits = (len(self.state) - len(self.initialstate)) * 32
+            # totalbits = (len(self.state) - (len(scheme.restbits) - 1)) * 32
 
             # logging
-            nets[i]  = (total_added_bits / self.total_xdim) - nets[:i].sum()
-            elbos[i] = elbo.item() / self.total_xdim
-            cma[i]   = totalbits / (self.total_xdim * (i + 1))
-            total[i] = totalbits
+            # nets[i]  = (total_added_bits / self.total_xdim) - nets[:i].sum()
+            # elbos[i] = elbo.item() / self.total_xdim
+            # cma[i]   = totalbits / (self.total_xdim * (i + 1))
+            # total[i] = totalbits
 
-            iterator.set_postfix_str(s=f"N:{nets[:i+1].mean():.2f}±{nets[:i+1].std():.2f}, " + 
-                                       f"D:{nets[:i+1].mean()-elbos[:i+1].mean():.4f}, " +
-                                       f"C: {cma[:i+1].mean():.2f}, " +
-                                       f"T: {totalbits:.0f}", refresh=False)
+            # iterator.set_postfix_str(s=f"N:{nets[:i+1].mean():.2f}±{nets[:i+1].std():.2f}, " + 
+            #                            f"D:{nets[:i+1].mean()-elbos[:i+1].mean():.4f}, " +
+            #                            f"C: {cma[:i+1].mean():.2f}, " +
+            #                            f"T: {totalbits:.0f}", refresh=False)
 
         # write state to file
         if not os.path.exists(self.cf.state_dir):
@@ -105,14 +102,10 @@ class Codec:
         with open(os.path.join(self.cf.state_dir, f"{self.cf.model_name}.pt"), "wb") as fp:
             pickle.dump(self.state, fp)
         
-        print(f"N:{nets.mean():.4f}±{nets.std():.2f}, " +
-              f"E:{elbos.mean():.4f}±{elbos.std():.2f}, " +
-              f"D:{nets.mean() - elbos.mean():.6f}")
-        
-        print(f"ELBO: {elbos.mean()}, " +
-              f"Net Bitrate: {(len(self.state) - len(self.initialstate)) * 32 / (self.total_xdim * self.num_data)}, " +
-              f"Bitrate(with initial bits): {(len(self.state) - (len(scheme.restbits) - 1)) * 32 / (self.total_xdim * self.num_data)}, ")
-        
+        # print(f"N:{nets.mean():.4f}±{nets.std():.2f}, " +
+        #       f"E:{elbos.mean():.4f}±{elbos.std():.2f}, " +
+        #       f"D:{nets.mean() - elbos.mean():.6f}")
+
         print('compression complete')
         return
 
@@ -133,6 +126,4 @@ class Codec:
 
             self.decoded_data.insert(0, x.view(self.model.xdim))
 
-        # check if the initial state matches the output state
-        assert self.initialstate == self.state
         return self.decoded_data

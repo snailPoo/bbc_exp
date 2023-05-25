@@ -68,6 +68,15 @@ def extract_blocks(arr, block_size=(32, 32)):
     arr = arr.swapaxes(1,2).reshape(b * (h//_h) * (w//_w), c, _h, _w)
     return np.split(arr, arr.shape[0], 0)
 
+def extract_blocks2(input, factor=2):
+    B, C, H, W = input.shape
+    H_, W_ = H // factor, W // factor
+    x = input.reshape(B, C, H_, factor, W_, factor)
+    x = np.transpose(x, (0, 3, 5, 1, 2, 4)).copy()
+    x = x.reshape(B, factor * factor, C, H_, W_)
+    x = x.reshape(B * factor * factor, C, H_, W_)
+    return np.split(x, x.shape[0], 0)
+
 # create class that scales up the data to [0,255] if called
 class ToInt:
     def __call__(self, pic):
