@@ -22,7 +22,7 @@ conda env create -f bbc.yaml
 ```
 * 安裝 [craystack](https://github.com/j-towns/craystack)（vectorized ANS package）
 
-* 下載 [ImageNet32 Dataset](https://www.image-net.org/download.php)
+* 下載 [ImageNet32 Dataset](https://www.image-net.org/download.php) 至 data/imagenet/train_32 和 data/imagenet/val_32
 
 <h2 id="3">Usage</h2>
 
@@ -36,7 +36,7 @@ python model/train.py
 
 **如何執行壓縮測試？**  
 
-0. [下載 model checkpoint](https://drive.google.com/drive/folders/1LuL_slRQxpq9Jx3v1lxzN_FaatzYsesS?usp=share_link)
+0. [下載 model checkpoint](https://drive.google.com/drive/folders/1LuL_slRQxpq9Jx3v1lxzN_FaatzYsesS?usp=share_link) 至 model/params/*dataset_name*/*model_name*_best.pt
 1. 到 [config.py](./config.py) 修改 class Config_xxx 的超參數
 2. 執行測試：  
 
