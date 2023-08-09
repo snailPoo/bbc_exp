@@ -54,6 +54,34 @@ class ImageNetDataset(Dataset):
         label = -1
         return (x, label)
 
+class ImageNet64Dataset(Dataset):
+
+    def __init__(self, data_dir, data_shape=(64, 64, 3), transform=None):
+
+        self.data = None
+
+        data_paths = glob.glob(os.path.join(data_dir, "*.npz"))
+        for path in data_paths:
+            batch = np.load(path)['data']
+            self.data = batch if self.data is None else np.concatenate((self.data, batch), axis=0)
+
+        self.data_shape = data_shape
+        self.transform = transform
+
+
+    def __len__(self):
+        return self.data.shape[0]
+
+    def __getitem__(self, idx):
+        real_idx = idx//4
+        mod = idx % 4
+        x = self.data[real_idx].reshape(self.data_shape)
+        x = extract_blocks(x)[mod]
+        if self.transform:
+            x = self.transform(x)
+        label = -1
+        return (x, label)
+    
 def extract_blocks(arr, block_size=(32, 32)):
     _h, _w = block_size
     b, c, h, w = arr.shape
