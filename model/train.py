@@ -176,6 +176,13 @@ if __name__ == '__main__':
         shuffle=False, drop_last=True, **kwargs)
     cf.model_hparam.xdim = train_set[0][0].shape
 
+    # generalization test
+    # _, gen_test = load_data("cifar", cf.model_name)
+    # gtest_loader = DataLoader(
+    #     dataset=gen_test, 
+    #     sampler=None, batch_size=cf.batch_size, 
+    #     shuffle=True, drop_last=True, **kwargs)
+        
     # set up model and optimizer
     model, optimizer, scheduler = load_model(cf.model_name, cf.model_pt, 
                                              cf.model_hparam, cf.lr, cf.decay)
@@ -199,3 +206,5 @@ if __name__ == '__main__':
             scheduler.step()
         if epoch % cf.eval_freq == 0:
             eval(epoch, test_loader, model)
+            # print('generalization test')
+            # eval(epoch, gtest_loader, model)

@@ -5,12 +5,12 @@ from utils.discretization import *
 
 class Config_bbans(object):
     def __init__(self):
-        self.seed = 100   # seed for dataset generation
-        self.log_interval = 100
+        self.seed = 100 # seed for dataset generation
+        self.log_interval = 100 # interval for logging/printing of relevant values
         self.eval_freq = 2
 
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        self.dataset = 'imagenet_full'#'cifar'#'mnist'#'imagenet'#'imagenet_full'
+        self.dataset = 'mnist'#'mnist'#'cifar'#'imagenet'
 
         self.warmup = False
         self.epochs = 150
@@ -52,17 +52,17 @@ class Config_bbans(object):
 class Config_bitswap(object):
     def __init__(self):
         self.seed = 99
-        self.log_interval = 3000  # interval for logging/printing of relevant values
+        self.log_interval = 3000
         self.eval_freq = 5
 
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        self.dataset = 'mnist'#'cifar'#'mnist'#'imagenet'#'imagenet_full'
+        self.dataset = 'mnist'#'mnist'#'cifar'#'imagenet'
 
         self.warmup = False
-        self.epochs = 1400
-        self.lr = 1e-3
-        self.decay = 0.999
-        self.batch_size = 256
+        self.epochs = 1000
+        self.lr = 5e-4
+        self.decay = 1
+        self.batch_size = 64
 
         self.model_name = 'bitswap'
 
@@ -112,12 +112,13 @@ class Config_bitswap(object):
                 self.discretization_batch_size = batch_size
                 self.discretization = posterior_sampling
                 # ------------ vANS -------------
+                #still have problems
                 self.bound_threshold = 1e-10
                 self.bin_prec = 10
                 self.obs_precision = 24
                 self.coding_prec = 18
                 self.batch_size = 1
-                self.initial_bits = int(1e5)#1e8  # if n_flif == 0 then use a random message with this many bits
+                self.initial_bits = int(1e5)#1e8
                 # -------------------------------
                 self.general_test = False
                 self.general_test_dataset = ''#'cifar'#'imagenet64'#'imagenet_uncrop
@@ -125,22 +126,20 @@ class Config_bitswap(object):
         self.compress_hparam = Compress_hparam(self.model_name, self.dataset, self.device, self.batch_size)
 
 
-
-
 class Config_hilloc(object):
     def __init__(self):
-        self.seed = 91   # seed for dataset generation
-        self.log_interval = 1000
+        self.seed = 91
+        self.log_interval = 10000
         self.eval_freq = 5
 
-        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        self.dataset = 'mnist'#'cifar'#'mnist'#'imagenet'#'imagenet_full'
+        self.device = torch.device('cuda:3' if torch.cuda.is_available() else 'cpu')
+        self.dataset = 'mnist'#'mnist'#'cifar'#'imagenet'
 
         self.warmup = False
-        self.epochs = 10000
-        self.lr = 1.5e-5
-        self.decay = 1
-        self.batch_size = 128
+        self.epochs = 1000
+        self.lr = 1e-3
+        self.decay = 0.9995
+        self.batch_size = 512
 
         self.model_name = "hilloc"
         self.bbc_scheme = 'BBC'
@@ -174,10 +173,9 @@ class Config_hilloc(object):
                 self.q_precision = 18
                 self.batch_size = 1
                 self.device = device
-                # self.n_flif = 0   # number of images to compress with FLIF to start the bb chain (bbans mode)
-                self.initial_bits = int(1e5)#1e8  # if n_flif == 0 then use a random message with this many bits
-                self.general_test = False
-                self.general_test_dataset = ''#'cifar'#'imagenet64'#'imagenet_uncrop
+                self.initial_bits = int(1e5)
+                self.general_test = True
+                self.general_test_dataset = 'imagenet64'#'cifar'#'imagenet64'#'imagenet_uncrop
 
         self.compress_hparam = Compress_hparam(self.device)
 
@@ -189,17 +187,16 @@ class Config_shvc(object):
         self.eval_freq = 1
 
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        self.dataset = 'cifar'#'cifar'#'mnist'#'imagenet'#'imagenet_full'
+        self.dataset = 'mnist'#'mnist'#'cifar'#'imagenet'
 
         self.warmup = False
         self.epochs = 1000
-        self.lr = 9e-4#5e-4
-        self.decay = 0.999#0.9961
-        self.batch_size = 16#256
+        self.lr = 9e-4
+        self.decay = 0.999
+        self.batch_size = 256
 
         self.model_name = "shvc"
         self.bbc_scheme = 'bitswap'
-        self.discretization_method = ''
 
         class Model_hparam:
             def __init__(self):

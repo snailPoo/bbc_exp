@@ -41,7 +41,7 @@ for i, x in enumerate(test_loader):
     if i == num_images:
         break
     x_ = x[0].numpy().astype(np.uint64)
-    if cf_compress.general_test and x[0].shape[-1] > 32:
+    if cf.model_name == 'bbans' and cf_compress.general_test and x[0].shape[-1] > 32:
         images.extend(extract_blocks(x_))
     else:
         images.append(x_)
